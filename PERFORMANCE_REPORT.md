@@ -30,7 +30,7 @@ This report summarizes the performance optimizations implemented for the Cyoda D
 
 ### 4. Performance Budget
 - **Budget Configuration**: Created performance budget with strict targets
-- **Monitoring**: Added npm scripts for automated performance checking
+- **Monitoring**: Added pnpm scripts for automated performance checking
 - **Targets Set**:
   - First Contentful Paint: < 1.5s
   - Largest Contentful Paint: < 2.5s
@@ -115,7 +115,7 @@ If you prefer to run tests manually:
 
 3. **Run Lighthouse (in another terminal):**
    ```bash
-   lighthouse http://localhost:3000 --budget-path=performance-budget.json --view
+   pnpm dlx lighthouse@13 http://localhost:3000 --budget-path=performance-budget.json --view
    ```
 
 4. **Clean up:**
@@ -179,7 +179,7 @@ If you prefer to run tests manually:
 
 3. **Run Lighthouse (in another terminal):**
    ```bash
-   lighthouse http://localhost:3000 --budget-path=performance-budget.json --view
+   pnpm dlx lighthouse@13 http://localhost:3000 --budget-path=performance-budget.json --view
    ```
 
 4. **Clean up:**
