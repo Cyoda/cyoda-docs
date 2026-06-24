@@ -1,0 +1,146 @@
+---
+title: "Identity and IAM"
+description: "Self-hosted cyoda-go IAM admin surface — OIDC provider trust, JWT signing keys, machine-to-machine clients, and the configuration that governs them."
+sidebar:
+  order: 35
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+cyoda-go is an OAuth 2.0 authorization server; this page is the operator's
+reference for the **IAM admin surface** that configures it on a
+self-hosted instance — which external identities to trust, which keys
+sign and verify tokens, and which machine-to-machine clients exist. For
+the conceptual model (token issuance, on-behalf-of exchange, federation),
+see [Authentication and identity](/concepts/authentication-and-identity/);
+for the managed equivalent, see
+[Cyoda Cloud → identity and entitlements](/cyoda-cloud/identity-and-entitlements/).
+
+All paths below are admin endpoints and require an administrative token.
+The [REST API reference](/reference/api/) carries the authoritative
+request/response schemas; this page covers what each group is for and how
+the pieces fit together. Run `cyoda help auth` against your binary for the
+version-specific detail.
+
+## OIDC provider trust
+
+Register the external OpenID Connect issuers a tenant should trust. Each
+registration is validated against its discovery document, and incoming
+tokens are checked against the local issuer first, then each registered
+provider in turn.
+
+| Method &amp; path | Purpose |
+| --- | --- |
+| `GET /oauth/oidc/providers` | List registered providers. |
+| `POST /oauth/oidc/providers` | Register a provider. |
+| `PATCH /oauth/oidc/providers/{id}` | Update a registration. |
+| `POST /oauth/oidc/providers/{id}/invalidate` | Stop trusting a provider (reversible). |
+| `POST /oauth/oidc/providers/{id}/reactivate` | Resume trusting it. |
+| `DELETE /oauth/oidc/providers/{id}` | Remove a registration. |
+| `POST /oauth/oidc/providers/reload` | Re-fetch provider metadata (JWKS) cluster-wide. |
+
+A registration describes how to trust the issuer:
+
+```json
+{
+  "wellKnownConfigUri": "https://your-idp/.well-known/openid-configuration",
+  "issuers": ["https://your-idp/"],
+  "expectedAudiences": ["cyoda-prod"],
+  "rolesClaim": "realm_access.roles"
+}
+```
+
+- **`wellKnownConfigUri`** (required) — the provider's OIDC discovery
+  endpoint. cyoda-go fetches the JWKS and metadata from it.
+- **`issuers`** — allowed `iss` values. When omitted, the `iss` claim must
+  match the discovery document's `issuer` exactly.
+- **`expectedAudiences`** — accepted `aud` values. **When several tenants
+  share one IdP, set a distinct audience per registration** — this is what
+  disambiguates tokens; ambiguous tokens are rejected rather than guessed.
+  When omitted, the audience is not checked and issuer binding is the only
+  trust anchor.
+- **`rolesClaim`** — the claim that carries roles, overriding the global
+  default (`CYODA_OIDC_ROLES_CLAIM`, typically `roles`). Per-provider
+  override accommodates IdP variation — Keycloak uses `realm_access.roles`,
+  Cognito uses `cognito:groups`. Object-nested claims are supported.
+
+<Aside type="note">
+OIDC registration requires a **UUID-formatted tenant**. Deployments that
+bootstrapped on the literal string `default-tenant` must migrate to a
+tenant UUID before registering a provider.
+</Aside>
+
+## JWT signing keys
+
+cyoda-go signs the tokens it issues with asymmetric keypairs and can also
+trust externally injected public keys. Both are managed under
+`/oauth/keys`.
+
+### Signing keypairs
+
+| Method &amp; path | Purpose |
+| --- | --- |
+| `GET /oauth/keys/keypair/current` | The active signing keypair (public part). |
+| `POST /oauth/keys/keypair` | Create / rotate a keypair. |
+| `POST /oauth/keys/keypair/{keyId}/invalidate` | Invalidate a keypair (with grace). |
+| `POST /oauth/keys/keypair/{keyId}/reactivate` | Reactivate it. |
+| `DELETE /oauth/keys/keypair/{keyId}` | Delete it. |
+
+### Trusted external keys
+
+The `/oauth/keys/trusted/*` endpoints register public keys from an
+external issuer so cyoda-go accepts tokens signed elsewhere. The same
+`invalidate` / `reactivate` / `delete` lifecycle applies.
+
+<Aside type="caution" title="Defaults changed in v0.8.1">
+
+- **Signing keys expire** after a default **365 days** and must be
+  rotated. The startup banner warns for the final 30 days before
+  expiry — wire rotation into your operations.
+- **Only `RS256`** is accepted for signing and verification. Other
+  algorithms are rejected at runtime.
+- **Trusted-key registration is off by default.** Opt in explicitly with
+  `CYODA_IAM_TRUSTED_KEY_REGISTRATION_ENABLED=true`.
+
+</Aside>
+
+## Machine-to-machine clients
+
+Manage the technical-user clients that authenticate with the OAuth 2.0
+client-credentials grant (see
+[machine-to-machine credentials](/concepts/authentication-and-identity/#machine-to-machine-credentials)).
+
+| Method &amp; path | Purpose |
+| --- | --- |
+| `GET /clients` | List M2M clients. |
+| `POST /clients` | Create a client. |
+| `PUT /clients/{clientId}/secret` | Rotate the client secret. |
+| `DELETE /clients/{clientId}` | Delete a client. |
+
+Creation returns the credential once, in
+[RFC 7591](https://www.rfc-editor.org/rfc/rfc7591) form — capture the
+secret at creation time:
+
+```json
+{
+  "client_id": "abc523BCD",
+  "client_secret": "…",
+  "client_id_issued_at": 1709913600,
+  "client_secret_expires_at": 0
+}
+```
+
+## Configuration
+
+The IAM behaviours above are governed by `CYODA_*` configuration; the
+authoritative key list lives in the binary (`cyoda help config`). The
+settings most likely to affect an upgrade:
+
+| Variable | Effect |
+| --- | --- |
+| `CYODA_IAM_TRUSTED_KEY_REGISTRATION_ENABLED` | Enables the trusted-key endpoints. Default `false`. |
+| `CYODA_OIDC_ROLES_CLAIM` | Default JWT claim read for roles when a provider sets no `rolesClaim`. |
+
+See [Configuration](/reference/configuration/) for the configuration
+model and [Authentication and identity](/concepts/authentication-and-identity/)
+for the concepts.
