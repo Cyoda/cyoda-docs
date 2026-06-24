@@ -15,7 +15,9 @@ goes beyond a single id lookup, or when you want to scope by workflow
 state. For single-entity reads, stay on the CRUD endpoints in
 [working with entities](/build/working-with-entities/); for cross-entity
 analytics, use [SQL](/build/analytics-with-sql/); for event-driven
-compute, use [gRPC compute nodes](/build/client-compute-nodes/).
+compute, use [gRPC compute nodes](/build/client-compute-nodes/). For
+counts and aggregates without the entity bodies, jump to
+[grouped statistics](#grouped-statistics).
 
 ## Two query modes
 
@@ -167,6 +169,90 @@ form, see [`point_time` in analytics](/build/analytics-with-sql/).
   cheaper per entity than a series of `direct` pages.
 - Avoid open-ended `pointInTime` scans across every revision — anchor
   the query at a specific timestamp or a short window.
+
+## Grouped statistics
+
+When you want **counts and aggregates** rather than the entities
+themselves — *how many orders are in each state? what is the total
+amount per country?* — use the grouped-statistics query instead of
+paging a search result and summing client-side. It returns one row per
+group and never the underlying entity bodies, so it stays cheap over
+large populations.
+
+```http
+POST /entity/stats/{entityName}/{modelVersion}/query
+```
+
+```bash
+curl -X POST http://localhost:8080/api/entity/stats/orders/1/query \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "groupBy": ["state", "$.country"],
+    "aggregations": [
+      { "op": "sum", "field": "$.amount", "as": "totalAmount" },
+      { "op": "avg", "field": "$.amount" }
+    ],
+    "condition": {
+      "type": "simple",
+      "jsonPath": "$.channel",
+      "operation": "EQUALS",
+      "value": "web"
+    }
+  }'
+```
+
+The request has four parts:
+
+- **`groupBy`** (required) — an ordered list of dimensions. Each entry is
+  either the literal `state` (the workflow state) or a `$.`-prefixed
+  JSONPath into the entity payload. The result `groupKey` is ordered to
+  match.
+- **`aggregations`** (optional) — per-group numeric aggregates. Each is
+  `{ "op", "field", "as" }` where `op` is one of `sum`, `avg`, `min`,
+  `max`, `stdev`, `field` is a JSONPath, and `as` is an optional alias
+  (defaults to `op(field)`, e.g. `sum($.amount)`). Every group also
+  carries a `count` whether or not you request aggregations.
+- **`condition`** (optional) — a predicate that restricts the population,
+  using the **same** [Condition DSL](#filter-shape) as search.
+- **`limit`** (optional) — caps the number of buckets returned; must be
+  ≤ the server's `CYODA_STATS_GROUP_MAX` (default 10000).
+
+The response is one bucket per group:
+
+```json
+[
+  {
+    "groupKey": [
+      { "field": "state", "value": "submitted" },
+      { "field": "$.country", "value": "GB" }
+    ],
+    "count": 31,
+    "aggregations": { "totalAmount": 48210.0, "avg($.amount)": 1555.16 }
+  }
+]
+```
+
+Aggregation values are numeric, or `null` when a group has no eligible
+inputs.
+
+### Point-in-time statistics
+
+Like search, the query accepts a `pointInTime` to aggregate the world
+**as it existed at a past instant** — without standing up a derived
+counter entity that processors must maintain on every transition. Add it
+to the request body:
+
+```json
+{
+  "groupBy": ["state"],
+  "pointInTime": "2026-03-31T23:59:59Z"
+}
+```
+
+This answers end-of-quarter and audit roll-up questions directly — *how
+many claims were pending at midnight on the last day of Q1?* When
+omitted, the query runs against the current consistency time.
 
 ## Where to go next
 

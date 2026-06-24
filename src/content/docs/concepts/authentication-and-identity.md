@@ -46,25 +46,35 @@ downstream authorization.
 The result: the audit trail records who the original user was at every hop,
 and each service still only sees a token scoped to what it is allowed to do.
 
-## External key trust
+## External key trust and OIDC federation
 
-Cyoda can be configured to **trust tokens issued by an external IdP** — your
-corporate Okta, Auth0, or Keycloak, for example. The platform accepts tokens
-signed with keys it recognises, maps the external subject to an internal
-identity, and applies the local authorization rules. Users sign in with their
-organisation's single sign-on and receive entitlements within Cyoda.
+Cyoda can be configured to **trust tokens issued by external identity
+providers** — your corporate Okta, Auth0, Keycloak, Entra, or any
+spec-compliant OpenID Connect (OIDC) issuer. The platform validates tokens
+signed with keys it recognises, maps the external subject and roles onto an
+internal identity, and applies the local authorization rules. Users sign in
+with their organisation's single sign-on and receive entitlements within Cyoda.
 
-External key trust is configured per environment; the list of trusted signers
-and the subject-to-identity mapping are part of the tenant's identity
-configuration.
+Trust is established **per tenant**. cyoda-go keeps a registry of OIDC
+providers: each registration pins an issuer — and optionally the audiences it
+will accept and the claim that carries roles — and the platform validates an
+incoming token against the local issuer first, then against the registered
+providers in turn. Where several tenants share one physical IdP, tokens are
+disambiguated by audience and ambiguous tokens are rejected rather than
+guessed, so one tenant can never borrow another's trust.
+
+Provider metadata — the JWKS used to verify signatures — is fetched from each
+issuer's OIDC discovery document, refreshed across the cluster, and guarded
+against server-side request forgery.
 
 ## Where this is configured
 
-- **Self-hosted (cyoda-go).** Identity configuration — bootstrap credentials,
-  JWT signing keys, external IdP trust — is managed via cyoda-go
-  configuration. See the
-  [cyoda-go authentication reference](https://github.com/Cyoda/cyoda-go#authentication)
-  for the authoritative parameter list.
+- **Self-hosted (cyoda-go).** Identity is managed through cyoda-go's IAM
+  admin API and configuration: bootstrap credentials, JWT signing keys,
+  machine-to-machine clients, and OIDC provider trust. See
+  [Reference → Identity and IAM](/reference/identity-and-iam/) for the
+  endpoints and the configuration that governs them, or run `cyoda help auth`
+  against your binary.
 - **Cyoda Cloud.** Identity is surfaced as a managed service:
   [Cyoda Cloud → identity and entitlements](/cyoda-cloud/identity-and-entitlements/).
 
