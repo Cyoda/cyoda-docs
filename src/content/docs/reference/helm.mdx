@@ -51,6 +51,14 @@ never put raw credentials into the chart's `values.yaml` in a
 production deployment — wire an existing `Secret` via `existingSecret`
 or equivalent.
 
+## Database migrations
+
+Schema migrations can run under a **separate Postgres connection** from
+the runtime. Set an optional migration DSN (`migrate.postgres`) when the
+account that applies DDL should differ from the least-privilege account
+the running pods use — a common production split. When it is unset,
+migrations run over the runtime connection.
+
 ## Related topics
 
 <ul>

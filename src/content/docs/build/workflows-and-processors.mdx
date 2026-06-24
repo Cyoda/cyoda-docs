@@ -66,6 +66,38 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 An entity model can have multiple workflows, each with its own `criterion` at the workflow level. When an entity is created, the platform evaluates each active workflow's criterion to select the applicable workflow. The platform evaluates active workflows in the order they are defined and uses the first whose criterion matches (or the first with no criterion, which matches unconditionally). This allows different processing paths for different categories of entities within the same model.
 
+### Annotations
+
+Workflows, states, and transitions each accept an optional `annotations`
+object — arbitrary client-owned JSON metadata that the engine **stores
+and round-trips faithfully but never interprets**. Use it to attach
+concerns that belong to your application rather than the state machine:
+display labels and UI hints, permitted roles for application-level RBAC,
+or routing tags consumed by your own tooling.
+
+```json
+{
+  "version": "1.1",
+  "name": "Payment Request Workflow",
+  "initialState": "INVALID",
+  "active": true,
+  "annotations": {
+    "ui": { "color": "#0aa7c2", "icon": "payment" },
+    "rbac": { "editRoles": ["payments-admin"] }
+  },
+  "states": {
+    "INVALID": {
+      "annotations": { "label": "Needs validation" },
+      "transitions": []
+    }
+  }
+}
+```
+
+Each `annotations` value must be a JSON object and is capped at **64 KB**
+per field. The engine never reads these values; they are yours to
+produce and consume.
+
 ## Import and Export
 
 Workflows are managed via import and export API endpoints on the entity
@@ -78,6 +110,22 @@ existing workflows are reconciled with the payload:
 
 See [API reference](/reference/api/) for endpoint details and the full
 request/response schemas.
+
+### Strict validation
+
+From cyoda-go v0.8.1 the import endpoint validates payloads strictly and
+rejects the whole request rather than silently absorbing mistakes. A
+payload is rejected when it:
+
+- declares a schema `version` other than `"1.1"` (rejected with
+  `WORKFLOW_SCHEMA_VERSION_UNSUPPORTED`);
+- carries unknown or misspelled fields (e.g. `transtions`);
+- references a dangling state or reuses a name;
+- relies on an empty array to mean "leave unchanged" in `REPLACE` or
+  `ACTIVATE` mode — an empty array now deletes.
+
+Regenerate any import payloads authored against the older, lenient
+contract before upgrading.
 
 ## States
 

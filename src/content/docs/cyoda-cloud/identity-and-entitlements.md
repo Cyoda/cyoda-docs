@@ -13,9 +13,12 @@ live yet, and details may change as the design settles.
 :::
 
 > This page covers identity operations for the **hosted Cyoda Cloud**
-> platform. For self-hosted cyoda-go identity (OAuth 2.0 issuance,
-> M2M credentials, external key trust on your own instance), see the
-> [cyoda-go identity docs](https://github.com/Cyoda/cyoda-go/blob/main/docs/).
+> platform. The OIDC provider trust, signing-key, and M2M-client surface
+> described here as cloud design now ships in self-hosted **cyoda-go**;
+> for running it on your own instance see
+> [Reference → Identity and IAM](/reference/identity-and-iam/). The
+> data-plane contract is identical, so what you configure locally carries
+> over to the managed service.
 
 ## Overview
 
