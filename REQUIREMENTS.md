@@ -193,7 +193,7 @@ A modern, performant static documentation site that combines traditional documen
 ## Integration Requirements
 
 ### 17. Existing Asset Migration
-- **Source**: Developer documentation assets from https://github.com/Cyoda-platform/cyoda-docs/tree/main/dist/resources
+- **Source**: Developer documentation assets from https://github.com/Cyoda/cyoda-docs/tree/main/dist/resources
 - **Target**: Eleventy site structure
 - **Preservation**: Maintain all existing content and functionality
 - **Compatibility**: Ensure no conflicts with Stoplight Elements

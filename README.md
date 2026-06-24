@@ -1,6 +1,6 @@
 # Cyoda Cloud Documentation
 
-[![Deploy to GitHub Pages](https://github.com/Cyoda-platform/cyoda-docs/actions/workflows/static.yml/badge.svg)](https://github.com/Cyoda-platform/cyoda-docs/actions/workflows/static.yml)
+[![Deploy to GitHub Pages](https://github.com/Cyoda/cyoda-docs/actions/workflows/static.yml/badge.svg)](https://github.com/Cyoda/cyoda-docs/actions/workflows/static.yml)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 
 > **Central hub for Cyoda developer resources, API documentation, and onboarding materials**

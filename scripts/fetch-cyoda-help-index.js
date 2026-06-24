@@ -8,9 +8,9 @@ const __dirname = path.dirname(__filename);
 
 const ASSET_BASENAME = (version) => `cyoda_help_${version}.json`;
 const JSON_URL = (version) =>
-  `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${version}/${ASSET_BASENAME(version)}`;
+  `https://github.com/Cyoda/cyoda-go/releases/download/v${version}/${ASSET_BASENAME(version)}`;
 const SUMS_URL = (version) =>
-  `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${version}/SHA256SUMS`;
+  `https://github.com/Cyoda/cyoda-go/releases/download/v${version}/SHA256SUMS`;
 
 function err(cls, message) {
   return new Error(`${cls}: ${message}`);
