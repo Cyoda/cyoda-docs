@@ -15,8 +15,16 @@ jobs:
   cleanup-preview:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Surge
-        run: npm install -g surge
+      - name: Harden the runner (audit mode)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - name: Remove Surge deployment
         env:
@@ -30,7 +38,7 @@ jobs:
           fi
           SURGE_DOMAIN="cyoda-docs-${CLEAN_ENV}.surge.sh"
           echo "🗑️ Removing deployment: https://$SURGE_DOMAIN"
-          surge teardown "$SURGE_DOMAIN" --token "$SURGE_TOKEN" || echo "Domain may not exist or already removed"
+          pnpm dlx surge@0.27.4 teardown "$SURGE_DOMAIN" --token "$SURGE_TOKEN" || echo "Domain may not exist or already removed"
           echo "CLEAN_ENV=$CLEAN_ENV" >> "$GITHUB_ENV"
 
       - name: Confirm cleanup
