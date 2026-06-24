@@ -316,6 +316,9 @@ export default defineConfig({
 				SiteTitle: './src/components/SiteTitle.astro',
 				// Override the table of contents to add copy page button
 				TableOfContents: './src/components/TableOfContents.astro',
+				// Override the page title to surface the frontmatter description
+				// as a visible tagline on release-notes pages
+				PageTitle: './src/components/PageTitle.astro',
 			},
 		}),
 	],

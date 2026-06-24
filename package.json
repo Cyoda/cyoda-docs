@@ -6,7 +6,7 @@
     "dev": "astro dev",
     "predev": "node scripts/fetch-cyoda-help-index.js --if-missing && node scripts/generate-help-pages.js && node scripts/fetch-cyoda-openapi.js --if-missing && node scripts/fetch-cyoda-schemas.js --if-missing",
     "start": "astro dev",
-    "build": "npm run fetch:help-index && npm run generate:help-pages && npm run fetch:openapi && npm run fetch:schemas && npm run generate:schema-pages && astro build && npm run export:markdown && npm run generate:llms && npm run generate:llms-full && npm run generate:md-sitemap && npm run package:schemas",
+    "build": "pnpm run fetch:help-index && pnpm run generate:help-pages && pnpm run fetch:openapi && pnpm run fetch:schemas && pnpm run generate:schema-pages && astro build && pnpm run export:markdown && pnpm run generate:llms && pnpm run generate:llms-full && pnpm run generate:md-sitemap && pnpm run package:schemas",
     "build:only": "astro build",
     "export:markdown": "node scripts/export-markdown.js",
     "generate:llms": "node scripts/generate-llms-txt.js",
@@ -20,14 +20,14 @@
     "package:schemas": "node scripts/package-schemas.js",
     "preview": "astro preview",
     "astro": "astro",
-    "test": "npm run test:scripts && playwright test",
+    "test": "pnpm run test:scripts && playwright test",
     "test:scripts": "node --test scripts/*.test.js scripts/lib/*.test.js tests/*.test.js",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
     "test:manual": "playwright test tests/cookie-consent-manual.spec.ts --headed --workers=1",
     "test:integration": "playwright test tests/cookie-consent-integration.spec.ts",
-    "perf:audit": "npm run build && npx serve dist -l 3000 & sleep 3 && npx lighthouse http://localhost:3000 --budget-path=performance-budget.json --view && pkill -f 'serve dist'",
-    "perf:check": "npm run build && npx lighthouse http://localhost:3000 --budget-path=performance-budget.json --output=json --output-path=lighthouse-report.json"
+    "perf:audit": "pnpm run build && pnpm exec serve dist -l 3000 & sleep 3 && pnpm dlx lighthouse@13 http://localhost:3000 --budget-path=performance-budget.json --view && pkill -f 'serve dist'",
+    "perf:check": "pnpm run build && pnpm dlx lighthouse@13 http://localhost:3000 --budget-path=performance-budget.json --output=json --output-path=lighthouse-report.json"
   },
   "dependencies": {
     "@astrojs/react": "^5.0.3",
@@ -46,10 +46,25 @@
     "rehype-mermaid": "^3.0.0",
     "sharp": "^0.34.2",
     "turndown": "^7.2.1",
-    "turndown-plugin-gfm": "^1.0.2"
+    "turndown-plugin-gfm": "^1.0.2",
+    "vanilla-cookieconsent": "^3.1.0"
   },
-  "overrides": {
-    "lodash": "^4.17.21",
-    "@astrojs/sitemap": "~3.6.0"
-  }
+  "devDependencies": {
+    "serve": "^14.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "overrides": {
+      "lodash": "^4.17.21",
+      "@astrojs/sitemap": "~3.6.0"
+    },
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "fsevents"
+    ]
+  },
+  "packageManager": "pnpm@10.34.4+sha512.8768be55200ae3f2226b6527fcca2687e14bc4e5f12d7721a0f25da3df47915177058648db4177baf348120fa0ba2752d8d8d93f6beaf1fe64ae18da8de961af"
 }

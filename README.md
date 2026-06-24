@@ -82,25 +82,22 @@ The documentation is automatically deployed to GitHub Pages and available at:
 ### Local Development
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Start development server
-npm run dev
+pnpm dev
 
 # Build for production
-npm run build
+pnpm build
 
 # Preview production build
-npm run preview
+pnpm preview
 ```
 
 ### Legacy Development (http-server)
 ```bash
-# Install http-server
-npm install --global http-server
-
-# Run http-server
-http-server dist
+# Serve the built site
+pnpm dlx http-server dist
 ```
 
 ## Deployment Configuration

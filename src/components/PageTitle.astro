@@ -1,0 +1,36 @@
+---
+// Overrides Starlight's default PageTitle to surface the frontmatter
+// `description` as a visible tagline beneath the H1 on release-notes pages.
+// Starlight normally renders `description` only into <head> meta tags; for
+// release pages it is the page's headline summary and should be on the page.
+// Scoped to `releases/*` so other pages keep Starlight's default behaviour.
+// Mirrors the default markup in @astrojs/starlight/components/PageTitle.astro
+// (h1 id must stay `_top` — it is Starlight's back-to-top / skip-link anchor).
+const { entry, id } = Astro.locals.starlightRoute;
+const { title, description } = entry.data;
+const showTagline = id.startsWith('releases/') && Boolean(description);
+---
+
+<h1 id="_top">{title}</h1>
+{showTagline && <p class="release-tagline">{description}</p>}
+
+<style>
+	@layer starlight.core {
+		h1 {
+			margin-top: 1rem;
+			font-size: var(--sl-text-h1);
+			line-height: var(--sl-line-height-headings);
+			font-weight: 600;
+			color: var(--sl-color-white);
+		}
+	}
+
+	.release-tagline {
+		margin-top: 0.5rem;
+		font-size: var(--sl-text-lg);
+		line-height: 1.5;
+		font-weight: 400;
+		color: var(--sl-color-gray-2);
+		text-wrap: balance;
+	}
+</style>

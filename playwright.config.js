@@ -83,13 +83,13 @@ export default defineConfig({
   /* Run your local dev server before starting the tests */
   webServer: process.env.CI ? {
     // In CI, serve the built site for faster, more reliable tests
-    command: 'npx serve dist -l 4321',
+    command: 'pnpm exec serve dist -l 4321',
     url: 'http://localhost:4321',
     reuseExistingServer: false,
     timeout: 60 * 1000, // 1 minute
   } : {
     // In local development, use dev server for hot reload
-    command: 'npm run dev',
+    command: 'pnpm run dev',
     url: 'http://localhost:4321',
     reuseExistingServer: true,
     timeout: 120 * 1000, // 2 minutes
