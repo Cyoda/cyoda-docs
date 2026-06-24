@@ -95,8 +95,10 @@ Component overrides in `astro.config.mjs` → `starlight.components`: `Head`, `F
 
 ### Deployment
 
-- `.github/workflows/static.yml` — production deploy to GitHub Pages on push to `main`. Runs `pnpm test` with `GA_MEASUREMENT_ID` injected before deploy.
+- `.github/workflows/deploy.yml` — production deploy to GitHub Pages on push to `main`. Runs `pnpm test` with `GA_MEASUREMENT_ID` injected before deploy.
+- `.github/workflows/ci.yml` — build + test on PRs targeting `main` (no deploy).
 - `.github/workflows/preview-deploy.yml` / `cleanup-preview.yml` — Surge.sh branch previews.
+- `.github/workflows/audit.yml` — weekly non-blocking `pnpm audit` (reports to the job summary; never gates).
 
 ## Conventions for AI assistants
 
