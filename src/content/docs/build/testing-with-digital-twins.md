@@ -75,7 +75,7 @@ for that suite. For everything else, in-memory is the default.
 ## Examples
 
 Worked examples live in
-[cyoda-go/examples](https://github.com/cyoda-platform/cyoda-go/tree/main/examples),
+[cyoda-go/examples](https://github.com/Cyoda/cyoda-go/tree/main/examples),
 including scenario-simulation runners you can adapt as a template. When a
 cyoda-go release ships a new example, this page links it.
 

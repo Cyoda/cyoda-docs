@@ -63,7 +63,7 @@ configuration.
 - **Self-hosted (cyoda-go).** Identity configuration — bootstrap credentials,
   JWT signing keys, external IdP trust — is managed via cyoda-go
   configuration. See the
-  [cyoda-go authentication reference](https://github.com/cyoda-platform/cyoda-go#authentication)
+  [cyoda-go authentication reference](https://github.com/Cyoda/cyoda-go#authentication)
   for the authoritative parameter list.
 - **Cyoda Cloud.** Identity is surfaced as a managed service:
   [Cyoda Cloud → identity and entitlements](/cyoda-cloud/identity-and-entitlements/).

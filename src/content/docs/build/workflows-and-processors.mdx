@@ -41,7 +41,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 ```json
 {
-  "version": "1",
+  "version": "1.1",
   "name": "Workflow Name",
   "desc": "Workflow description",
   "initialState": "StateName",
@@ -53,7 +53,8 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 #### Attributes
 
-- `version`: Workflow schema version
+- `version`: Workflow schema version. Must be `"1.1"` on cyoda-go v0.8.1
+  and later — payloads declaring `"1"` or `"1.0"` are rejected at import.
 - `name`: Identifier for the workflow. Must be unique per entity model.
 - `desc`: Detailed description of the workflow
 - `initialState`: Starting point for new entities
@@ -367,7 +368,7 @@ The following section walks through the configuration step by step.
 
 ```json
 {
-  "version": "1",
+  "version": "1.1",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -381,7 +382,7 @@ Start by defining the overall structure of states and transitions.
 
 ```json
 {
-  "version": "1",
+  "version": "1.1",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -466,7 +467,7 @@ We add criteria to the `VALIDATE` and `MATCH` transitions:
 
 ```json
 {
-  "version": "1",
+  "version": "1.1",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -569,7 +570,7 @@ We add two processors to the `APPROVE` transition in the `SUBMITTED` state, resp
 
 ```json
 {
-  "version": "1",
+  "version": "1.1",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",

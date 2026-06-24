@@ -23,9 +23,9 @@ import { spawnSync as _spawnSync } from 'node:child_process';
 
 const TARBALL_NAME = (version, os, arch) => `cyoda_${version}_${os}_${arch}.tar.gz`;
 const TARBALL_URL = (version, os, arch) =>
-  `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${version}/${TARBALL_NAME(version, os, arch)}`;
+  `https://github.com/Cyoda/cyoda-go/releases/download/v${version}/${TARBALL_NAME(version, os, arch)}`;
 const SUMS_URL = (version) =>
-  `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${version}/SHA256SUMS`;
+  `https://github.com/Cyoda/cyoda-go/releases/download/v${version}/SHA256SUMS`;
 
 // ---------------------------------------------------------------------------
 // Error factory
@@ -96,7 +96,7 @@ export function detectPlatform({ platform, arch }) {
     throw err(
       'UnsupportedPlatform',
       `platform "${platform}" (arch "${arch}") is not supported. Only darwin and linux are supported. ` +
-        `Windows users can install cyoda manually from https://github.com/Cyoda-platform/cyoda-go/releases.`
+        `Windows users can install cyoda manually from https://github.com/Cyoda/cyoda-go/releases.`
     );
   }
   if (arch === 'arm64') {

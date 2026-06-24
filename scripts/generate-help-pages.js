@@ -108,7 +108,7 @@ function renderPage(t, allTopics, pinnedPatch, urlPrefix) {
   // text are HTML-escaped: pinnedPatch is constrained upstream by
   // parsePinFile's semver guard, but escaping here is cheap defense
   // in depth.
-  const releaseUrl = `https://github.com/Cyoda-platform/cyoda-go/releases/tag/v${pinnedPatch}`;
+  const releaseUrl = `https://github.com/Cyoda/cyoda-go/releases/tag/v${pinnedPatch}`;
   const aside = [
     `<p class="cyoda-help-pinned"><em>cyoda-go version <a href="${htmlEscape(releaseUrl)}">${htmlEscape(pinnedPatch)}</a></em></p>`,
     '',

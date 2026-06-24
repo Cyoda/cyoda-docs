@@ -42,8 +42,8 @@ function makeFetch(responses) {
 // a strict semver shape. The actual upstream isn't hit — the fetch is
 // stubbed via makeFetch().
 const TEST_VERSION = '0.0.1-test';
-const JSON_URL = `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${TEST_VERSION}/cyoda_help_${TEST_VERSION}.json`;
-const SUMS_URL = `https://github.com/Cyoda-platform/cyoda-go/releases/download/v${TEST_VERSION}/SHA256SUMS`;
+const JSON_URL = `https://github.com/Cyoda/cyoda-go/releases/download/v${TEST_VERSION}/cyoda_help_${TEST_VERSION}.json`;
+const SUMS_URL = `https://github.com/Cyoda/cyoda-go/releases/download/v${TEST_VERSION}/SHA256SUMS`;
 
 const validJson = fs.readFileSync(path.join(fixtureDir, 'help.valid.json'), 'utf8');
 const malformedJson = fs.readFileSync(path.join(fixtureDir, 'help.malformed.json'), 'utf8');

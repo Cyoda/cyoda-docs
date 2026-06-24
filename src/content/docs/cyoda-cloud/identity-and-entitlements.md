@@ -15,7 +15,7 @@ live yet, and details may change as the design settles.
 > This page covers identity operations for the **hosted Cyoda Cloud**
 > platform. For self-hosted cyoda-go identity (OAuth 2.0 issuance,
 > M2M credentials, external key trust on your own instance), see the
-> [cyoda-go identity docs](https://github.com/Cyoda-platform/cyoda-go/blob/main/docs/).
+> [cyoda-go identity docs](https://github.com/Cyoda/cyoda-go/blob/main/docs/).
 
 ## Overview
 
