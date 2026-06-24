@@ -24,13 +24,13 @@ stack — or when your CI pipeline wants a clean container image per run.
 
 cyoda-go publishes container images per release. The authoritative reference
 and pull instructions live in the
-[cyoda-go Docker reference](https://github.com/cyoda-platform/cyoda-go/tree/main/deploy/docker).
+[cyoda-go Docker reference](https://github.com/Cyoda/cyoda-go/tree/main/deploy/docker).
 
 ## Compose example
 
 The repository ships a minimal `compose.yaml` for getting a single node and
 PostgreSQL up, plus a richer
-[compose-with-observability](https://github.com/cyoda-platform/cyoda-go/tree/main/examples/compose-with-observability)
+[compose-with-observability](https://github.com/Cyoda/cyoda-go/tree/main/examples/compose-with-observability)
 example that wires tracing and metrics.
 
 Use these as templates rather than retyping them here — they track the
@@ -57,7 +57,7 @@ The observability example demonstrates a full loop:
 
 Tune sampling and log level at runtime via the admin endpoints;
 see the
-[cyoda-go observability reference](https://github.com/cyoda-platform/cyoda-go#observability).
+[cyoda-go observability reference](https://github.com/Cyoda/cyoda-go#observability).
 
 Health probes live on the admin port (default 9091): `/livez` (liveness) and
 `/readyz` (readiness). Both are unauthenticated.

@@ -212,7 +212,7 @@ export default defineConfig({
                 {
                     icon: 'github',
                     label: 'GitHub',
-                    href: 'https://github.com/Cyoda-platform/cyoda-docs'
+                    href: 'https://github.com/Cyoda/cyoda-docs'
                 },
                 {
                     icon: 'linkedin',

@@ -53,7 +53,7 @@ differs.
 ## Helm chart
 
 cyoda-go ships a Helm chart under
-[`deploy/helm`](https://github.com/cyoda-platform/cyoda-go/tree/main/deploy/helm).
+[`deploy/helm`](https://github.com/Cyoda/cyoda-go/tree/main/deploy/helm).
 The chart provisions the cyoda-go Deployment, a Service, a ConfigMap for
 non-sensitive configuration, and Secret references for credentials.
 
