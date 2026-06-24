@@ -216,13 +216,13 @@ own code.
     : '';
 
   const mainIndexContent = `---
-title: JSON Schemas
-description: Complete reference for all JSON schemas used in Cyoda
+title: CloudEvents Schemas
+description: Complete reference for the CloudEvent and entity/model JSON schemas used in Cyoda
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-# JSON Schemas
+# CloudEvents Schemas
 
 This section documents the JSON schemas used by the Cyoda platform — CloudEvent
 payloads exchanged over the gRPC processing stream, plus the entity and model
