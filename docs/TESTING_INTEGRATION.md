@@ -32,7 +32,7 @@ Automated tests now run as part of both production and preview deployments to ve
 ### Production Deployment (`.github/workflows/static.yml`)
 ```yaml
 - name: Run GDPR compliance and Google Analytics tests
-  run: npm test
+  run: pnpm test
   env:
     NODE_ENV: production
     GA_MEASUREMENT_ID: ${{ secrets.GA_MEASUREMENT_ID }}
@@ -42,7 +42,7 @@ Automated tests now run as part of both production and preview deployments to ve
 ### Preview Deployment (`.github/workflows/preview-deploy.yml`)
 ```yaml
 - name: Run GDPR compliance and Google Analytics tests
-  run: npm test
+  run: pnpm test
   env:
     NODE_ENV: production
     GA_MEASUREMENT_ID: ${{ secrets.GA_MEASUREMENT_ID }}
@@ -110,19 +110,19 @@ All 13 tests pass successfully:
 
 ```bash
 # Run all tests
-npm test
+pnpm test
 
 # Run with UI for debugging
-npm run test:ui
+pnpm test:ui
 
 # Run in headed mode to see browser
-npm run test:headed
+pnpm test:headed
 
 # Run specific test file
-npx playwright test tests/cookie-consent-test.spec.ts
+pnpm exec playwright test tests/cookie-consent-test.spec.ts
 
 # Run specific test
-npx playwright test -g "should remove analytics cookies"
+pnpm exec playwright test -g "should remove analytics cookies"
 ```
 
 ## Monitoring and Maintenance

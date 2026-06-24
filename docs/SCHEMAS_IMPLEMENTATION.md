@@ -79,7 +79,7 @@ The build process has been updated to include schema documentation:
 ```json
 {
   "scripts": {
-    "build": "npm run generate:schema-pages && astro build && npm run export:markdown && npm run generate:llms && npm run package:schemas"
+    "build": "pnpm generate:schema-pages && astro build && pnpm export:markdown && pnpm generate:llms && pnpm package:schemas"
   }
 }
 ```
@@ -126,8 +126,8 @@ The build process has been updated to include schema documentation:
 ### For Documentation Maintainers
 
 1. **Add new schemas**: Place JSON files in `src/schemas/` directory
-2. **Regenerate pages**: Run `npm run generate:schema-pages`
-3. **Build site**: Run `npm run build`
+2. **Regenerate pages**: Run `pnpm generate:schema-pages`
+3. **Build site**: Run `pnpm build`
 
 ### Manual Page Creation
 
@@ -230,7 +230,7 @@ Potential improvements:
 ## Troubleshooting
 
 ### Schemas not appearing
-- Run `npm run generate:schema-pages` to regenerate pages
+- Run `pnpm generate:schema-pages` to regenerate pages
 - Check that JSON files are valid
 - Verify file paths in generated MDX files
 
@@ -240,7 +240,7 @@ Potential improvements:
 - Verify `client:load` directive is present
 
 ### ZIP file not generated
-- Run `npm run package:schemas` manually
+- Run `pnpm package:schemas` manually
 - Check `dist/` directory permissions
 - Verify archiver dependency is installed
 

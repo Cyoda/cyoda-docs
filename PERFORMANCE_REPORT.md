@@ -74,14 +74,14 @@ This report summarizes the performance optimizations implemented for the Cyoda D
 ### Prerequisites
 Ensure you have the required tools installed:
 ```bash
-npm install -g lighthouse serve
+# tools run via pnpm dlx / devDependency — no global install needed
 ```
 
 ### Available Test Commands
 
 #### 1. Full Performance Audit (Interactive)
 ```bash
-npm run perf:audit
+pnpm perf:audit
 ```
 This command will:
 - Build the production version
@@ -92,7 +92,7 @@ This command will:
 
 #### 2. Automated Performance Check (CI/CD)
 ```bash
-npm run perf:check
+pnpm perf:check
 ```
 This command will:
 - Build the production version
@@ -105,12 +105,12 @@ If you prefer to run tests manually:
 
 1. **Build the site:**
    ```bash
-   npm run build
+   pnpm build
    ```
 
 2. **Serve the built site:**
    ```bash
-   npx serve dist -l 3000
+   pnpm exec serve dist -l 3000
    ```
 
 3. **Run Lighthouse (in another terminal):**
@@ -138,14 +138,14 @@ Budget violations will be highlighted in red in the Lighthouse report.
 ### Prerequisites
 Ensure you have the required tools installed:
 ```bash
-npm install -g lighthouse serve
+# tools run via pnpm dlx / devDependency — no global install needed
 ```
 
 ### Available Test Commands
 
 #### 1. Full Performance Audit (Interactive)
 ```bash
-npm run perf:audit
+pnpm perf:audit
 ```
 This command will:
 - Build the production version
@@ -156,7 +156,7 @@ This command will:
 
 #### 2. Automated Performance Check (CI/CD)
 ```bash
-npm run perf:check
+pnpm perf:check
 ```
 This command will:
 - Build the production version
@@ -169,12 +169,12 @@ If you prefer to run tests manually:
 
 1. **Build the site:**
    ```bash
-   npm run build
+   pnpm build
    ```
 
 2. **Serve the built site:**
    ```bash
-   npx serve dist -l 3000
+   pnpm exec serve dist -l 3000
    ```
 
 3. **Run Lighthouse (in another terminal):**
@@ -198,7 +198,7 @@ The performance budget is configured in `performance-budget.json` with these tar
 Budget violations will be highlighted in red in the Lighthouse report.
 
 ## Recommendations for Ongoing Performance
-1. **Regular Audits**: Run `npm run perf:audit` before deployments
+1. **Regular Audits**: Run `pnpm perf:audit` before deployments
 2. **Image Optimization**: Continue using WebP format for new images
 3. **Bundle Monitoring**: Watch for JavaScript bundle size growth
 4. **Core Web Vitals**: Monitor real-world performance metrics
