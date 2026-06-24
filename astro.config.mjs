@@ -299,6 +299,11 @@ export default defineConfig({
 					collapsed: true,
 					autogenerate: { directory: 'reference' }
 				},
+				{
+					label: 'Releases',
+					collapsed: true,
+					autogenerate: { directory: 'releases' }
+				},
 			],
 			components: {
 				// Override the default head component to include Analytics

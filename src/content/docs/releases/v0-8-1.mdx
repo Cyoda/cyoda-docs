@@ -1,0 +1,233 @@
+---
+title: "Cyoda-Go v0.8.1"
+description: "Federated identity, point-in-time statistics, OpenAPI-conformant IAM, and a new home on GitHub."
+sidebar:
+  label: "v0.8.1"
+  # Releases sort newest-first via a negative-date order: -YYYYMMDD.
+  # A later release (e.g. 2026-08-01 → -20260801) sorts above this one
+  # automatically, with no renumbering of existing pages.
+  order: -20260623
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+_Released 23 June 2026 · 52 issues delivered_
+
+This is our largest release since the project went public. This cycle
+focuses heavily on identity management and historical data analytics,
+while resolving key API and SPI parity gaps with Cyoda Cloud. It is also
+our first release under our new GitHub home.
+
+## 🏠 We are now github.com/Cyoda
+
+Our GitHub organization has been renamed from **Cyoda-platform** to
+**Cyoda**, aligning the organization, the platform, and the company under
+a single name.
+
+While GitHub automatically redirects existing clones, links, and Go
+module imports, we recommend updating your local remotes when convenient:
+
+```bash
+git remote set-url origin https://github.com/Cyoda/cyoda-go.git
+```
+
+The Go module path remains **unchanged** — no `go.mod` updates are
+required.
+
+## 📌 Why v0.8.1 and not v0.8.0
+
+There is no v0.8.0 release. During release preparation, the
+`cyoda-go-spi` v0.8.0 tag was published prematurely before it was
+finalized. To keep versioning for both `cyoda-go` and `cyoda-go-spi` in
+lock-step, we bumped both components directly to v0.8.1.
+
+## ✨ Highlights
+
+- **Federated Identity (OIDC):** Securely validate external OpenID
+  Connect tokens (e.g. Auth0, Zitadel, Keycloak) with multi-issuer
+  chaining and cross-tenant safety.
+- **Point-in-Time Statistics:** Execute high-performance historical
+  queries to aggregate data and counts exactly as they existed at any
+  moment in the past.
+- **OpenAPI-Conformant IAM:** Manage signing keys and machine-to-machine
+  technical clients via fully implemented, standard-compliant admin
+  endpoints.
+- **Richer Workflow Configurations:** Attach custom metadata annotations
+  to workflows to drive UI/UX or custom RBAC policies.
+- **Strict Import Validation:** Eliminate silent typos and structural
+  errors with immediate runtime rejection of invalid schemas.
+
+## 🔍 Details
+
+### 🔐 Federated identity arrives (OIDC)
+
+Cyoda-Go can now validate tokens from **external OpenID Connect (OIDC)
+providers** on a per-tenant basis. You can connect your preferred
+identity provider (IdP) — such as Auth0, Zitadel, Keycloak, Entra, or any
+spec-compliant OIDC issuer — and register it using our new REST
+endpoints:
+
+- **Per-tenant OIDC provider registry:** Includes seven new endpoints
+  under `/oauth/oidc/providers` to register, list, get, update,
+  invalidate, reactivate, delete, and reload providers.
+- **Chained multi-issuer validation:** Validates against the local issuer
+  first, falling back to registered OIDC providers with support for
+  per-provider issuers, `expectedAudiences`, and `rolesClaim` overrides.
+- **Support for object-shaped `rolesClaim`:** Correctly maps role
+  assertions nested inside a claim object (e.g. Zitadel project roles) to
+  Cyoda roles.
+- **Safe-by-default cross-tenant routing:** Prevents token collisions
+  when multiple tenants share a physical IdP. Tokens are explicitly
+  disambiguated by audience; ambiguous tokens are rejected rather than
+  guessed. Operators sharing an IdP must configure distinct
+  `expectedAudiences` per registration.
+- **SSRF-hardened discovery:** Enforces pinned-issuer validation at fetch
+  time, utilizes private-network guards, and respects configurable
+  timeouts.
+- **Cluster-wide cache eviction:** Propagates provider updates across
+  nodes, invalidating the JWKS cache on all peers.
+- **Built-in observability:** Out-of-the-box Prometheus metrics are now
+  emitted by the OIDC subsystem.
+
+Run `cyoda help auth` to get started.
+
+### 🔑 IAM endpoints now conform to the OpenAPI spec
+
+The previously stubbed IAM surface is now fully implemented. Signing-key
+and client management are live at their spec-conformant paths with
+standardized DTOs:
+
+- **`/oauth/keys/keypair/*` and `/oauth/keys/trusted/*`:** Provides 10
+  admin endpoints to manage signing keypairs and trusted external keys.
+  Storage-layer isolation is enforced per tenant, and a finite-validity
+  bootstrap key warns operators prior to expiration.
+- **`/clients`:** Manages machine-to-machine (technical user) clients,
+  including creation, listing, deletion, and secret rotation.
+
+### 📊 Point-in-time grouped statistics
+
+A new grouped-statistics query answers: _"How many entities match X,
+broken down by Y?"_ This query returns counts and numerical aggregates
+(sum, avg, min, max, stdev) over any data field or workflow state,
+filtered by the standard search Condition DSL. To optimize performance,
+it returns only the calculated metrics, never the underlying entity
+bodies.
+
+```http
+POST /entity/stats/query/{entityName}/{modelVersion}
+```
+
+Two design choices make this more powerful than a standard `GROUP BY`
+database query:
+
+1. **Snapshot/point-in-time capabilities:** Query the data exactly as it
+   existed at any instant in the past. This lets you easily compute
+   end-of-quarter counts, historical audit roll-ups, or audit questions
+   like _"how many claims were pending at midnight?"_
+2. **Simplified domain modeling:** In an entity-per-item model, tracking
+   metrics (like "available units per variant") often requires building
+   and maintaining a derived counter entity that processors must update
+   on every state transition. Computing these aggregates on demand from
+   existing entities eliminates the need for these derived entities,
+   keeping your architecture cleaner.
+
+### 🧩 Richer workflow configuration
+
+- **Client-owned annotations:** Attach arbitrary JSON metadata (up to
+  64 KB per field) to workflows, states, and transitions. This lets
+  applications attach functionally meaningful information directly to the
+  workflow graph — to drive frontend UI/UX, trigger custom backend
+  processing, enforce application-level RBAC controls, and more. These
+  annotations are stored and round-tripped faithfully without engine
+  interpretation.
+- **Scheduled state transitions:** Introduces the configuration schema
+  and SPI required to fire transitions based on time.
+- **gRPC context pass-through:** Passes `ProcessorConfig.Context` directly
+  through to external gRPC processors to align with Cyoda Cloud.
+- **`RetryPolicy` validation:** Validates retry policies and exposes an
+  `inbound-retryable` flag to callers.
+- **Decoupled execution and timing:** Clearly separates a processor's
+  **execution location** from its **scheduled-transition timing** in both
+  the schema and the help documentation.
+
+### 🛡️ Strict workflow imports
+
+To prevent typos and structural errors from failing silently at import
+time and causing unexpected runtime behavior, v0.8.1 introduces strict
+validation. The engine now rejects structurally invalid graphs (such as
+dangling states or duplicate names), unknown JSON fields (e.g. spelling
+`transitions` with a typo), and silent empty-array deletions. It also
+enforces workflow schema version 1.1 and respects `"active": false` flags
+during roundtrips.
+
+### 🧱 SPI &amp; operational polish
+
+- **Transaction-state sentinel errors:** The storage SPI now exposes
+  typed sentinel errors (rolled back, already closed, already committed)
+  to allow plugins and callers to handle transaction states precisely.
+- **Helm chart updates:** Adds an optional, separate migration DSN
+  (`migrate.postgres`) so you can run schema migrations using a
+  connection with different privileges than the runtime environment.
+- **Targeted CI runs:** CI now runs the full test suite on `release/`
+  branches, ensuring release candidates receive the same validation as
+  the main branch.
+- **Dependency maintenance:** Upgraded dependencies across root and
+  plugin modules (including OpenTelemetry, pgx, x/crypto, kin-openapi,
+  and testcontainers) alongside Go toolchain updates to address standard
+  library CVEs.
+
+<Aside type="caution" title="Upgrading from v0.7.x — read this first">
+
+This release intentionally tightens several API and schema contracts.
+Please review the following breaking changes before upgrading:
+
+- **Workflow payload schema version:** All workflow payloads must now
+  declare `version: "1.1"`. Payloads using `"1.0"` or bare `"1"` will be
+  rejected. You must regenerate your import payloads.
+- **Strict workflow validation:** You must clean up any unknown or
+  misspelled fields in your workflow configurations. Empty-array no-ops
+  are no longer allowed in `REPLACE`/`ACTIVATE` modes.
+- **Trusted-key registration:** This feature is now disabled by default.
+  You must opt in explicitly by setting
+  `CYODA_IAM_TRUSTED_KEY_REGISTRATION_ENABLED=true`.
+- **Signing key expiration:** Signing keys now expire after a default of
+  365 days. Deployments must implement rotation. The startup banner will
+  display a warning starting 30 days before key expiration.
+- **Cryptographic algorithms:** Only `RS256` is supported for signing and
+  verification in this release. Other algorithms defined in the
+  specification will be rejected at runtime.
+- **OIDC tenant validation:** OIDC registration now requires a
+  UUID-formatted tenant. If you are bootstrapping deployments on the
+  literal string `default-tenant`, you must migrate to a tenant UUID.
+
+For the complete and authoritative list of breaking changes, behavioral
+updates, and known limitations (such as in-memory M2M client persistence
+and rollback hazards), consult the
+[CHANGELOG](https://github.com/Cyoda/cyoda-go/blob/main/CHANGELOG.md#081--2026-06-23).
+
+</Aside>
+
+## 🚀 Resources &amp; getting started
+
+For complete installation guides, building from source, detailed system
+architectures, and guidance on running the engine locally or in
+production, explore our core project resources:
+
+- [**Cyoda Hub (cyoda.dev)**](https://cyoda.dev) — the primary portal for
+  the Cyoda ecosystem, community links, and major updates.
+- [**Cyoda Documentation (docs.cyoda.net)**](https://docs.cyoda.net) —
+  quick-starts, configuration schemas, API references, deployment
+  architectures, and operations guides.
+- [**GitHub Project (github.com/Cyoda/cyoda-go)**](https://github.com/Cyoda/cyoda-go)
+  — view the source code, check build requirements, or download specific
+  binary releases, packages, and cryptographic checksums directly from
+  the [v0.8.1 release tag](https://github.com/Cyoda/cyoda-go/releases/tag/v0.8.1).
+
+## 💬 Feedback
+
+If you find a bug, encounter a parity gap, or have a feature request,
+please open an issue or start a thread in our
+[GitHub Discussions](https://github.com/Cyoda/cyoda-go/discussions) — and
+feel free to join the conversation on
+[Discord](https://discord.com/invite/95rdAyBZr2). Thank you for building
+with Cyoda-Go!
