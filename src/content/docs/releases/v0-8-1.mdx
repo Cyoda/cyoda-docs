@@ -114,7 +114,7 @@ it returns only the calculated metrics, never the underlying entity
 bodies.
 
 ```http
-POST /entity/stats/query/{entityName}/{modelVersion}
+POST /entity/stats/{entityName}/{modelVersion}/query
 ```
 
 Two design choices make this more powerful than a standard `GROUP BY`
