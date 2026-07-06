@@ -36,7 +36,7 @@
     "@playwright/test": "^1.55.0",
     "@primer/primitives": "^11.1.0",
     "@stoplight/elements": "^9.0.6",
-    "archiver": "^7.0.1",
+    "archiver": "^8.0.0",
     "astro": "^6.1.4",
     "dotenv": "^17.2.2",
     "glob": "^13.0.6",
