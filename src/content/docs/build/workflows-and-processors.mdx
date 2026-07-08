@@ -41,7 +41,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Workflow Name",
   "desc": "Workflow description",
   "initialState": "StateName",
@@ -53,8 +53,11 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 #### Attributes
 
-- `version`: Workflow schema version. Must be `"1.1"` on cyoda-go v0.8.1
-  and later — payloads declaring `"1"` or `"1.0"` are rejected at import.
+- `version`: Workflow schema `MAJOR.MINOR` version. The current version is
+  `"1.2"` (cyoda-go v0.8.2); the server accepts `"1.1"` and `"1.2"` and stamps
+  the current version on export. Malformed values such as `"1"` or `"1.0"`
+  are rejected at import. Run `cyoda help workflows schema-version` for the
+  authoritative supported range.
 - `name`: Identifier for the workflow. Must be unique per entity model.
 - `desc`: Detailed description of the workflow
 - `initialState`: Starting point for new entities
@@ -77,7 +80,7 @@ or routing tags consumed by your own tooling.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Payment Request Workflow",
   "initialState": "INVALID",
   "active": true,
@@ -117,7 +120,8 @@ From cyoda-go v0.8.1 the import endpoint validates payloads strictly and
 rejects the whole request rather than silently absorbing mistakes. A
 payload is rejected when it:
 
-- declares a schema `version` other than `"1.1"` (rejected with
+- declares a schema `version` outside the supported range (currently
+  `"1.1"`–`"1.2"`) or malformed such as `"1"`/`"1.0"` (rejected with
   `WORKFLOW_SCHEMA_VERSION_UNSUPPORTED`);
 - carries unknown or misspelled fields (e.g. `transtions`);
 - references a dangling state or reuses a name;
@@ -416,7 +420,7 @@ The following section walks through the configuration step by step.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -430,7 +434,7 @@ Start by defining the overall structure of states and transitions.
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -515,7 +519,7 @@ We add criteria to the `VALIDATE` and `MATCH` transitions:
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -618,7 +622,7 @@ We add two processors to the `APPROVE` transition in the `SUBMITTED` state, resp
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
