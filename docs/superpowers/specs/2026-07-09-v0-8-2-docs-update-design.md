@@ -231,9 +231,10 @@ originating workflow transaction `T`**:
   fallback.
 - Document env vars `CYODA_TX_TOKEN_TTL` (default 90s), `CYODA_GRPC_NODE_ADDR`,
   `CYODA_COMPUTE_HTTP_BASE`; cross-link to config reference.
-- **Confirm during implementation** whether `startNewTxOnDispatch` /
-  `COMMIT_BEFORE_DISPATCH` are user-facing config (they appear in release-note
-  prose but are not in the §9.2 table) — only document them if they are.
+- `startNewTxOnDispatch` / `COMMIT_BEFORE_DISPATCH` **are user-facing** — add
+  them to the §9.2 Processor Configuration Fields table and reference them in
+  the tx-join narrative (the standalone-execution fallback is
+  `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`).
 
 **#349 Point-in-time canonical rule — `searching-entities.mdx` +
 `working-with-entities.mdx`.** Add a short note (in each page's existing
@@ -278,16 +279,23 @@ reconciled contract —
 Most of these are also captured in the release-notes breaking-changes Aside;
 the job here is only to ensure no guide prose still asserts the old behavior.
 
-**#386 Edge messages.** The `help/messages.md` mirror already generates. Add a
-hand-authored **link** to it from an appropriate surface (e.g. the APIs/
-surfaces overview or the search/entities "where to go next"), so it is
-discoverable outside the raw help mirror. Verify current linkage first.
+**#386 Edge messages — new `build/edge-messages.mdx` page.** Add a
+hand-authored build-section guide for the edge-message store (a new top-level
+page, not just a link). Use `<FromTheBinary topic="messages" />` (the
+`messages` help topic exists — "messages — edge message store API"), plus
+prose covering: what an edge message is (arbitrary JSON under a
+server-generated time-UUID + AMQP-aligned headers + optional flat metadata
+map), that it is a standalone store — a peer of the entity store, not an
+entity, and creating one fires no transition/processor/criterion — and the
+`POST /api/message/new/{subject}` surface with the `metaData` (camelCase)
+metadata map. Give it a `sidebar.order` slotting it into the build section;
+cross-link from working-with-entities / apis-and-surfaces. (The auto-generated
+`help/messages.md` mirror remains; this is the curated build-guide entry.)
 
 ### Part 3 — Release-notes correctness
 
-In `releases/v0-8-2.mdx`, change "14 issues delivered" to the milestone's
-actual count (10) — or footnote that the higher number counts merged PRs.
-Confirm the intended figure with Paul during review.
+In `releases/v0-8-2.mdx`, change "14 issues delivered" to **"10 issues
+delivered"** (the milestone count; decided).
 
 ## File-by-file change list
 
@@ -295,6 +303,7 @@ Confirm the intended figure with Paul during review.
 - `src/data/cyoda-config-all.source.json` (tracked — committed manual copy)
 - `scripts/generate-config-data.js`
 - `scripts/generate-config-data.test.js`
+- `src/content/docs/build/edge-messages.mdx` (#386 — new build-guide page)
 
 **Modified:**
 - `package.json` — add `generate:config-data` step to `build` + `predev`.
@@ -311,8 +320,9 @@ Confirm the intended figure with Paul during review.
 - `src/content/docs/build/client-compute-nodes.md` — tx-joined callbacks +
   env vars (#287).
 - `src/content/docs/reference/api.mdx` — #369 prose audit.
-- `src/content/docs/releases/v0-8-2.mdx` — issue-count fix.
-- One surface page — edge-messages link (#386).
+- `src/content/docs/releases/v0-8-2.mdx` — issue-count fix (14 → 10).
+- Cross-links into the new `build/edge-messages.mdx` from
+  `working-with-entities` / `apis-and-surfaces`.
 
 ## Testing / verification
 
@@ -327,9 +337,15 @@ Confirm the intended figure with Paul during review.
 - Grep sweep: no guide prose still contradicts the v0.8.2 contract
   (`PATCH`, sort, `changeType`, `previousTransition`, delete semantics).
 
-## Open questions (confirm during implementation)
+## Open questions
 
-1. Exact "issues delivered" figure for the release page (10 vs 14-as-PRs).
-2. Whether `startNewTxOnDispatch` / `COMMIT_BEFORE_DISPATCH` are user-facing
-   (document only if so).
-3. Best host page for the edge-messages link (#386).
+All three prior open questions are resolved (2026-07-09):
+
+1. Release page reads **"10 issues delivered"**.
+2. `startNewTxOnDispatch` / `COMMIT_BEFORE_DISPATCH` **are user-facing** —
+   documented in §9.2 and the tx-join narrative.
+3. Edge messages get a **new `build/edge-messages.mdx` page** (not just a
+   link).
+
+Remaining detail deferred to implementation: the exact `sidebar.order` for the
+new edge-messages page within the build section.
