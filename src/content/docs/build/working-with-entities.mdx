@@ -28,6 +28,8 @@ framework.
 Every request is authenticated with a bearer token. Every response includes
 the entity's current revision, state, and timestamps.
 
+For durable inbound payloads that are not yet entities — a staging buffer at the platform edge — see [edge messages](/build/edge-messages/).
+
 ## Create
 
 Post an entity to its model. The first time you post, Cyoda discovers the

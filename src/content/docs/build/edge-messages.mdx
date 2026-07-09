@@ -1,0 +1,35 @@
+---
+title: "Edge messages"
+description: "The edge-message store — a durable, tenant-scoped staging buffer at the platform edge, a peer of the entity store."
+sidebar:
+  order: 27
+---
+
+import FromTheBinary from '../../../components/FromTheBinary.astro';
+
+<FromTheBinary topic="messages" />
+
+An **edge message** is an arbitrary JSON payload stored under a server-generated time-UUID together with a fixed set of AMQP-aligned headers and an optional flat metadata map. The store is standalone: a message is **not** an entity, and creating one does not touch the workflow engine — no transition fires, no processor or criterion runs. Edge messaging is a durable, tenant-scoped staging buffer at the platform edge, a peer of the entity store rather than part of it.
+
+Reach for it when you need to accept and durably hold inbound payloads before they become entities — a landing zone for messages you will validate, correlate, or replay into the entity model on your own schedule.
+
+## Posting a message
+
+```bash
+curl -X POST http://localhost:8080/api/message/new/orders-inbound \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "payload": { "orderId": "ORD-42", "raw": "..." },
+    "metaData": { "source": "edi-gateway", "batch": "2026-07-09-A" }
+  }'
+```
+
+The `{subject}` path segment (`orders-inbound` above) names the logical channel. The optional metadata map is carried under `metaData` (camelCase, symmetric with the response). The server assigns the time-UUID and returns it.
+
+For the full surface — headers, retrieval, and the exact envelope — run `cyoda help messages` against your binary; the callout above links the authoritative reference.
+
+## Where to go next
+
+- [Working with entities](/build/working-with-entities/) — promote a staged message into the entity model via the CRUD API.
+- [Client compute nodes](/build/client-compute-nodes/) — react to workflow transitions over gRPC.
