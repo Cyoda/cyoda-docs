@@ -78,7 +78,7 @@ not accept ad-hoc field filters; those belong to search.
 
 ## Update
 
-Direct updates use `PUT /api/entity/{format}/{entityId}` (loopback update — stores a new revision without a named transition) or `PUT /api/entity/{format}/{entityId}/{transition}` (update with a named transition). There is no `PATCH` endpoint — all writes are full-payload PUTs.
+Direct updates use `PUT /api/entity/{format}/{entityId}` (loopback update — stores a new revision without a named transition) or `PUT /api/entity/{format}/{entityId}/{transition}` (update with a named transition). `PUT` has **wholesale-replace** semantics: any field you omit from the body is destroyed. To change only some fields, use [`PATCH`](#partial-update-patch) instead.
 
 **Mutations that move the entity between lifecycle states should go through a
 named transition**, not a bare loopback update. Invoking the `submit` transition
@@ -95,6 +95,48 @@ curl -X PUT http://localhost:8080/api/entity/JSON/${ENTITY_ID}/submit \
 
 See [Build → workflows and processors](/build/workflows-and-processors/) for
 how to declare transitions.
+
+### Partial update (PATCH)
+
+When you want to change only the fields that moved — without resending (and risking clobbering) the rest of the entity — use `PATCH`:
+
+```http
+PATCH /api/entity/{format}/{entityId}
+PATCH /api/entity/{format}/{entityId}/{transition}
+```
+
+The body is a sparse JSON object applied to the **stored** entity with RFC 7386 (`application/merge-patch+json`) semantics: a non-null key overwrites, an explicit `null` deletes that key, and an omitted key is left untouched.
+
+```bash
+curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID} \
+  -H 'Content-Type: application/merge-patch+json' \
+  -H "If-Match: ${LAST_TRANSACTION_ID}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{ "amount": 130.00, "note": null }'
+```
+
+Unlike `PUT`, **`If-Match` is required** — the merge is applied relative to the base you read, so patching a stale base risks a lost update. The token is the `meta.transactionId` from your last `GET`; a missing header returns `428 PRECONDITION_REQUIRED` and a stale one returns `412`. The merged result is validated strictly against the model schema — a `PATCH` never extends the model, even in an extend-permitting mode. The request is JSON-only (XML ⇒ `415`); RFC 6902 JSON Patch is recognised but returns `501` for now.
+
+## Delete
+
+Delete a single entity by id, or delete a matched subset of a model with a condition:
+
+```bash
+# Delete entities matching a condition (empty body ⇒ every entity in the model)
+curl -X DELETE http://localhost:8080/api/entity/orders/1?verbose=true \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "type": "simple",
+    "jsonPath": "$.status",
+    "operation": "EQUALS",
+    "value": "cancelled"
+  }'
+```
+
+The `DELETE /api/entity/{entityName}/{modelVersion}` endpoint honours an `AbstractConditionDto` request body and removes only the matching entities; an **empty body still means all**. `verbose=true` returns the deleted ids, and the response reports matched-vs-removed counts separately. A malformed condition returns `400 INVALID_CONDITION`.
+
+Supplying the condition matters: earlier releases ignored it and wiped the entire model. Always send the condition you intend (or omit the body deliberately when you really do mean "all").
 
 ## Search
 
@@ -126,6 +168,8 @@ or search request to retrieve the world as of that timestamp:
 ```
 GET /api/entity/{entityId}?pointInTime=2026-03-01T00:00:00Z
 ```
+
+Point-in-time reads apply a single canonical rule across every storage engine and read path: **inclusive of the requested instant** (`<=`), compared at native precision with no millisecond round-up. The model-scoped list read (`GET /api/entity/{entityName}/{modelVersion}`) also honours `pointInTime` and stamps `meta.pointInTime` on the result.
 
 This is the primary way to answer regulatory and audit questions: *what did
 this customer's balance look like at quarter close?* For the same
