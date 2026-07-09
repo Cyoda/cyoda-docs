@@ -124,6 +124,15 @@ Unlike `PUT`, **`If-Match` is required** — the merge is applied relative to th
 Delete a single entity by id, or delete a matched subset of a model with a condition:
 
 ```bash
+# Delete a single entity by id
+curl -X DELETE http://localhost:8080/api/entity/${ENTITY_ID} \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+`DELETE /api/entity/{entityId}` removes exactly the entity with that UUID and
+returns its id, model key, and the transaction id of the delete.
+
+```bash
 # Delete entities matching a condition (empty body ⇒ every entity in the model)
 curl -X DELETE http://localhost:8080/api/entity/orders/1?verbose=true \
   -H 'Content-Type: application/json' \

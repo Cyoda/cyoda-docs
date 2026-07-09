@@ -44,7 +44,8 @@ transaction that dispatched them.
 ### 🔎 Search: sorting and pushdown
 
 Both search endpoints
-(`POST /api/entity/{entityName}/{modelVersion}/search` and the async variant)
+(`POST /api/search/direct/{entityName}/{modelVersion}` and the async
+`/api/search/async/{entityName}/{modelVersion}` variant)
 now accept `sort` query parameters (HTTP) or a structured `orderBy` array
 (gRPC). The HTTP grammar is `[@]path[:asc|desc]` — a bare dotted path for a
 scalar data field, an `@`-prefixed name for a meta field (`state`,
