@@ -133,6 +133,8 @@ that was current at the specified timestamp. The result is the set of
 entities that would have matched, using the revision active at that
 time.
 
+The rule is canonical across every storage engine and read path: **inclusive of the requested instant** (`<=`), compared at native precision with no millisecond round-up.
+
 ```bash
 curl -X POST http://localhost:8080/api/search/direct/orders/1 \
   -H 'Content-Type: application/json' \
@@ -149,15 +151,24 @@ close?* The Trino surface exposes the same capability as a column named
 `point_time` (snake-case, matching SQL convention); for the analytical
 form, see [`point_time` in analytics](/build/analytics-with-sql/).
 
-## Paging and sort (async)
+## Sorting results
 
-- `pageSize` and `pageNumber` are query parameters on
-  `/search/async/{jobId}/results`; they apply at result-fetch time,
-  not at job submission. `pageNumber` is zero-indexed.
-- Sort is not documented on the REST async surface at this release;
-  results are returned in insertion order.
-- A completed `jobId` is stable for its retention window — page
-  reads are idempotent.
+Both search endpoints (direct and async) accept sort keys. Over HTTP, add one or more `sort` query parameters using the grammar `[@]path[:asc|desc]`:
+
+- a bare dotted path sorts on a **scalar data field** (`amount`, `customer.tier`);
+- an `@`-prefix sorts on a **meta field** — one of `state`, `creationDate`, `lastUpdateTime`, `transitionForLatestSave`, `transactionId`, `id`;
+- direction defaults to `asc`.
+
+```
+POST /api/search/direct/orders/1?sort=@state&sort=amount:desc
+```
+
+Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`, and temporal chronologically. Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`. The number of sort keys per request is capped by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
+
+### Paging (async)
+
+- `pageSize` and `pageNumber` are query parameters on `/search/async/{jobId}/results`; they apply at result-fetch time, not at job submission. `pageNumber` is zero-indexed.
+- A completed `jobId` is stable for its retention window — page reads are idempotent.
 
 ## Performance notes
 
@@ -169,6 +180,7 @@ form, see [`point_time` in analytics](/build/analytics-with-sql/).
   cheaper per entity than a series of `direct` pages.
 - Avoid open-ended `pointInTime` scans across every revision — anchor
   the query at a specific timestamp or a short window.
+- On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database, and `LIMIT`/`OFFSET` are pushed down when no residual filtering remains. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
 
 ## Grouped statistics
 
