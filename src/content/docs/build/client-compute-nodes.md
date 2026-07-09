@@ -575,6 +575,7 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | `config.context` | string | `null` | Arbitrary string passed as `parameters` in the request. Use for handler-specific configuration. |
 | `config.asyncResult` | boolean | `false` | Enable async response processing (advanced). |
 | `config.crossoverToAsyncMs` | long | `5000` | Time before switching from sync to async response handling (advanced). |
+| `startNewTxOnDispatch` | boolean | `false` | Whether a fresh transaction is started when this processor is dispatched. Valid only when `executionMode` is `COMMIT_BEFORE_DISPATCH`; the validator rejects `true` for any other mode. With `COMMIT_BEFORE_DISPATCH` and `startNewTxOnDispatch=false` (the default), callbacks run standalone instead of joining the originating transaction (see §9.3.1). |
 
 ## 9.3 Execution Modes
 
@@ -585,6 +586,22 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | `ASYNC_NEW_TX` | Like `ASYNC_SAME_TX`, but your response is applied in a new transaction. Useful for long-running computations. |
 
 > For most use cases, **`SYNC`** is the simplest and recommended starting point.
+
+### 9.3.1 Transaction-joined callbacks
+
+Processor and criteria-evaluation callbacks from a compute node **join the originating workflow transaction** `T` rather than running standalone. Before each dispatch the engine mints a signed HMAC transaction token and attaches it to the outbound CloudEvent as the `cyodatxtoken` extension attribute. Your compute node echoes it back on callbacks — as the `X-Tx-Token` HTTP header or the `tx-token` gRPC metadata — and the receiving node verifies the HMAC and routes the callback to the transaction owner (a local join when the owner is this node, or an HTTP reverse-proxy / gRPC forward otherwise).
+
+The practical consequences:
+
+- Callbacks see the cascade's **uncommitted** writes, and their acks stay provisional until `T` commits.
+- `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
+- If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
+
+Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#vars-cluster)):
+
+- `CYODA_TX_TOKEN_TTL` — validity of the signed token (default `1m30s`).
+- `CYODA_GRPC_NODE_ADDR` — this node's gRPC endpoint advertised to peers (`host:port`, no scheme), used for B→A forwarding.
+- `CYODA_COMPUTE_HTTP_BASE` — base URL of the cyoda instance a compute node calls back into (compute-client side).
 
 ## 9.4 Externalized Criteria (Function) in Workflow JSON
 
