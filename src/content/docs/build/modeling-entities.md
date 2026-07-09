@@ -120,6 +120,18 @@ payment currency must match the customer's currency". Those belong in
 workflow criteria and processors where they can fail a transition and leave
 the old revision intact.
 
+## Uniqueness constraints
+
+Beyond structure and types, a model can declare **composite unique keys** — multi-field uniqueness the engine enforces on create and update. Register them on an **UNLOCKED** model:
+
+```
+PUT /model/{entityName}/{modelVersion}/unique-keys
+```
+
+Each key is an ordered set of scalar field paths, and uniqueness is scoped to `(tenant, model, version)` over live (non-deleted) entities. The null rule is all-or-nothing: if every field in a key is null or absent the entity is exempt; a partial key is rejected with `422 INVALID_UNIQUE_KEY`; a fully-present key is enforced. String comparison is byte-exact, and soft-deleting an entity frees its value-set for reuse.
+
+Composite unique keys are supported by the memory, SQLite, and PostgreSQL backends; the commercial backend returns `422 COMPOSITE_KEY_UNSUPPORTED` until its own support lands. Relevant error codes: `UNIQUE_VIOLATION` (409), `INVALID_UNIQUE_KEY` (422), `COMPOSITE_KEY_UNSUPPORTED` (422), and `INVALID_UNIQUE_KEY_DEFINITION` (422).
+
 ## Anti-patterns
 
 - **The god-entity.** One model that tries to represent everything. Split it

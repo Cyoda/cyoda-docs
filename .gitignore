@@ -18,6 +18,10 @@ src/schemas/
 # Auto-generated at build time by scripts/fetch-cyoda-help-index.js
 src/data/cyoda-help-index.json
 
+# Auto-generated at build time by scripts/generate-config-data.js
+# (source of truth is the tracked src/data/cyoda-config-all.source.json)
+src/data/cyoda-config-all.json
+
 # Auto-generated at build time by scripts/fetch-cyoda-openapi.js
 public/openapi/openapi.json
 public/openapi/openapi.yaml

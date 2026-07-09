@@ -567,7 +567,7 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | — | **Required.** The processor name. Sent as `processorName` in the request. |
-| `executionMode` | string | — | **Required.** One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`. |
+| `executionMode` | string | — | **Required.** One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`, `COMMIT_BEFORE_DISPATCH`. |
 | `config.attachEntity` | boolean | `true` | Whether to send entity data in the request payload. |
 | `config.calculationNodesTags` | string | `""` | Comma/semicolon-separated tags. Only members whose tags are a superset are eligible. |
 | `config.responseTimeoutMs` | long | `60000` | How long the platform waits for your response before timing out. |
@@ -575,6 +575,7 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | `config.context` | string | `null` | Arbitrary string passed as `parameters` in the request. Use for handler-specific configuration. |
 | `config.asyncResult` | boolean | `false` | Enable async response processing (advanced). |
 | `config.crossoverToAsyncMs` | long | `5000` | Time before switching from sync to async response handling (advanced). |
+| `startNewTxOnDispatch` | boolean | `false` | Whether a fresh transaction is started when this processor is dispatched. Valid only when `executionMode` is `COMMIT_BEFORE_DISPATCH`; the validator rejects `true` for any other mode. With `COMMIT_BEFORE_DISPATCH` and `startNewTxOnDispatch=false` (the default), callbacks run standalone instead of joining the originating transaction (see §9.3.1). |
 
 ## 9.3 Execution Modes
 
@@ -583,8 +584,25 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | `SYNC` | The workflow engine waits for your response within the same transaction. The transition completes only after your response is applied. |
 | `ASYNC_SAME_TX` | The engine sends the request and can process other work. Your response is applied within the same entity transaction. |
 | `ASYNC_NEW_TX` | Like `ASYNC_SAME_TX`, but your response is applied in a new transaction. Useful for long-running computations. |
+| `COMMIT_BEFORE_DISPATCH` | Commits the originating transaction before dispatching the request, releasing the storage connection for the duration of the external compute; the processor runs outside any transaction unless `startNewTxOnDispatch=true` opens one for it (see §9.3.1). On return, the result is reapplied via CompareAndSave in a new transaction. Relieves connection-pool pressure for slow processors; supersedes `ASYNC_NEW_TX` as the recommended mode for slow external work. |
 
 > For most use cases, **`SYNC`** is the simplest and recommended starting point.
+
+### 9.3.1 Transaction-joined callbacks
+
+Processor and criteria-evaluation callbacks from a compute node **join the originating workflow transaction** `T` rather than running standalone. Before each dispatch the engine mints a signed HMAC transaction token and attaches it to the outbound CloudEvent as the `cyodatxtoken` extension attribute. Your compute node echoes it back on callbacks — as the `X-Tx-Token` HTTP header or the `tx-token` gRPC metadata — and the receiving node verifies the HMAC and routes the callback to the transaction owner (a local join when the owner is this node, or an HTTP reverse-proxy / gRPC forward otherwise).
+
+The practical consequences:
+
+- Callbacks see the cascade's **uncommitted** writes, and their acks stay provisional until `T` commits.
+- `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
+- If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
+
+Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#all-variables)):
+
+- `CYODA_TX_TOKEN_TTL` — validity of the signed token (default `1m30s`).
+- `CYODA_GRPC_NODE_ADDR` — this node's gRPC endpoint advertised to peers (`host:port`, no scheme), used for B→A forwarding.
+- `CYODA_COMPUTE_HTTP_BASE` — base URL of the cyoda instance a compute node calls back into (compute-client side).
 
 ## 9.4 Externalized Criteria (Function) in Workflow JSON
 
