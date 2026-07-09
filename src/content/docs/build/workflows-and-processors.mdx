@@ -101,6 +101,18 @@ Each `annotations` value must be a JSON object and is capped at **64 KB**
 per field. The engine never reads these values; they are yours to
 produce and consume.
 
+As of workflow schema **1.2**, the same `annotations` bag extends to the two elements that previously lacked it:
+
+- **Processors** carry an embedded `annotations` object.
+- **Criteria** carry a sibling `criterionAnnotations` object on the workflow and on each transition — the criterion tree itself round-trips verbatim and is never parsed to attach metadata.
+
+Two well-known optional keys are recognised uniformly across all five element types (workflow, state, transition, processor, criteria) for renderer and condition-builder use:
+
+- `displayName` — a short human label;
+- `description` — a longer explanation.
+
+The same rules apply everywhere: each value is a JSON object, capped at 64 KB, stored and re-emitted compacted, and **never interpreted by the engine**. Processor annotations are additionally stripped before dispatch and never reach compute members. This is an additive change — every existing 1.1 payload remains valid.
+
 ## Import and Export
 
 Workflows are managed via import and export API endpoints on the entity
