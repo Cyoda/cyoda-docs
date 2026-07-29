@@ -37,8 +37,9 @@ That command now exists and works. This design settles how.
 1. Site pinned to v0.8.3; release-notes page published and linked.
 2. Every v0.8.3 milestone issue reflected in the relevant page — no false
    statements, no missing capability a reader would look for.
-3. The config swap-seam closed: the tracked source is regenerated from live
-   binary output by an explicit command, and version drift fails the build.
+3. The config swap-seam closed: the configuration reference is built from the
+   pinned binary's own output at build time, with no tracked source file that
+   can drift.
 4. Pre-existing falsehoods on pages this release touches are corrected, not
    worked around.
 
@@ -141,11 +142,25 @@ Verified against the v0.8.3 binary's own help content
 Settled with Paul on 2026-07-29 before this spec was written:
 
 1. **Scope:** full mirror of the v0.8.2 standard — all 19 issues.
-2. **Config seam:** maintainer refresh + build-time version guard (Part 1).
-   Rejected: fetching and executing the pinned binary during the build (a
-   supply-chain escalation right after the `#99` hardening work, ~17 MB per
-   build, platform matrix); and a hybrid live-if-present path (CI never
-   exercises it, so it rots quietly).
+2. **Config seam:** run `cyoda help config all --format=json` against the
+   pinned binary during the build, reusing `scripts/lib/cyoda-binary.js`
+   (Part 1).
+
+   *Corrected 2026-07-29.* This decision was first taken as "maintainer
+   refresh + build-time version guard", on the stated rationale that fetching
+   and executing the pinned binary would be a supply-chain escalation beyond
+   the `#99` hardening work. **That rationale was factually wrong.**
+   `fetch:openapi` and `fetch:schemas` already download and execute the pinned
+   binary on every build, through a tested shared helper
+   (`parsePinFile` → `ensureBinary` → run) with SHA256SUMS verification and a
+   system-binary fast-path. Reusing it is the established repo pattern, not a
+   new posture — and it is what the v0.8.2 spec already specified would happen
+   at v0.8.3 ("the generator's source changes … to 'run `cyoda help config
+   all`', and the tracked source file is retired").
+
+   The corrected approach is strictly better: no manual step, no drift guard
+   needed (the version is the pin by construction), and no tracked source file
+   to go stale.
 3. **Placement:** scheduled transitions extend `workflows-and-processors.mdx`
    in place. Rejected: a dedicated `build/scheduled-transitions.mdx`.
 4. **Predicates:** a "Predicate semantics" section on `searching-entities.mdx`
@@ -174,31 +189,31 @@ wording follows the corrected text.
 
 ### Part 1 — Config pipeline swap-seam
 
-**New `scripts/refresh-config-source.js`**, exposed as `pnpm refresh:config`:
+**`scripts/generate-config-data.js` becomes a fetch-style script**, structurally
+identical to `fetch-cyoda-openapi.js`:
 
-- Spawns `cyoda help config all --format=json` (binary resolved from `PATH`,
-  overridable via `CYODA_BIN`).
-- Fails with a clear message if the binary is absent, or if its reported
-  `version` does not match `cyoda-go-version.json`.
-- Writes `src/data/cyoda-config-all.source.json` (tracked).
-- Never runs as part of `build` or `predev` — it is a maintainer command,
-  invoked next to bumping the pin.
+- `parsePinFile(cyoda-go-version.json)` → `ensureBinary({version, cacheDir,
+  fetch, spawnSync, platformHint})` → `runBinaryCommand(binary, ['help',
+  'config', 'all', '--format=json'])`.
+- `ensureBinary` uses the cached binary, else a system `cyoda` whose
+  `--version` matches the pin, else downloads the platform tarball from the
+  release and verifies it against `SHA256SUMS`.
+- Non-zero exit or non-JSON stdout throws `BinaryExecutionFailed`.
+- `run()` gains `--if-missing` support so `predev` skips the work when the
+  output already exists, matching steps 1–4.
 
-**`scripts/generate-config-data.js` gains a drift guard.** `run()` takes the
-pinned version and throws `ConfigVersionDrift` when `raw.version` differs:
+**`src/data/cyoda-config-all.source.json` is deleted from tracking.** The
+tracked source existed only because the binary had no `config all` command; the
+version is now the pin by construction, so there is nothing to drift and no
+guard is required.
 
-```
-ConfigVersionDrift: src/data/cyoda-config-all.source.json is version "0.8.2",
-but cyoda-go-version.json pins "0.8.3" — run: pnpm refresh:config
-```
+`normalizeConfig()` is unchanged — same validation, same tolerance for empty
+`type` and absent `default`, same topic-then-name sort. Its seven existing
+tests still pass untouched; two `run()` tests are added with injected
+`spawnSync`/`fetch` (happy path writes sorted vars at the pinned version;
+non-zero binary exit fails the build).
 
-This is a genuine catch, not a formality: the current source reports
-`version: "dev"`, so it would fail the guard as-is.
-
-`normalizeConfig()` keeps its existing tolerance — empty `type`, absent
-`default` — unchanged.
-
-**Refresh output (verified against the v0.8.3 binary):**
+**Output delta (verified against the v0.8.3 binary):**
 
 | | v0.8.2 source | v0.8.3 binary |
 |---|---|---|
@@ -209,11 +224,8 @@ This is a genuine catch, not a formality: the current source reports
 Added: `CYODA_SCHEDULER_{ENABLED,SCAN_INTERVAL,BATCH_SIZE,DISTRIBUTION,COORDINATOR,REDISPATCH_BACKOFF,EXPIRY_GRACE}`
 and `CYODA_IAM_MOCK_KIND`. New topic: `scheduler`. **Nothing removed.**
 
-**Tests** (`scripts/generate-config-data.test.js`): version match passes;
-mismatch throws `ConfigVersionDrift` naming both versions and the remedy.
-
-**`CLAUDE.md`**: replace the "manually-provided copy" note with the refresh
-workflow, and add `refresh:config` to the commands block.
+**`CLAUDE.md`**: build-pipeline step 5 now describes the binary invocation, and
+the "never hand-edit" bullet records that the tracked source file is retired.
 
 ### Part 2 — Scheduled transitions → `workflows-and-processors.mdx`
 
@@ -422,18 +434,20 @@ Grep pass for prose the release contradicts, across `reference/api.mdx`,
 ## File-by-file change list
 
 **New:**
-- `scripts/refresh-config-source.js`
 - `src/content/docs/releases/v0-8-3.mdx`
 - `docs/superpowers/specs/2026-07-29-v0-8-3-docs-update-design.md` (this file)
 - `docs/superpowers/plans/2026-07-29-v0-8-3-docs-update.md`
 
 **Modified:**
 - `cyoda-go-version.json` — pin `0.8.3`
-- `package.json` — add `refresh:config`
-- `CLAUDE.md` — refresh workflow replaces the "manually-provided copy" note
-- `scripts/generate-config-data.js` — version drift guard
-- `scripts/generate-config-data.test.js` — guard tests
-- `src/data/cyoda-config-all.source.json` — regenerated (80 → 88 vars)
+- `package.json` — `--if-missing` on the `predev` config step
+- `CLAUDE.md` — build step 5 + retired-source note
+- `scripts/generate-config-data.js` — runs the pinned binary via `ensureBinary`
+- `scripts/generate-config-data.test.js` — `run()` tests
+
+**Deleted:**
+- `src/data/cyoda-config-all.source.json` — retired; the pinned binary is the
+  source
 - `src/content/docs/build/workflows-and-processors.mdx` — Parts 2, 6
 - `src/content/docs/build/searching-entities.mdx` — Part 3
 - `src/content/docs/build/client-compute-nodes.md` — Part 4
@@ -449,8 +463,8 @@ Grep pass for prose the release contradicts, across `reference/api.mdx`,
 - `pnpm build` — full pipeline. Re-pinning to v0.8.3 regenerates the help
   mirror, `reference/schemas/**`, `dist/markdown/`, `llms.txt` and
   `schemas.zip`; the config generator must pass its own guard.
-- Negative check: temporarily set the pin to `0.8.4` and confirm
-  `generate:config-data` fails with `ConfigVersionDrift` naming the remedy.
+- Negative check: a non-zero binary exit fails `generate:config-data` with
+  `BinaryExecutionFailed` (covered by the injected-`spawnSync` test).
 - Manual: `/releases/v0-8-3/` renders (Aside, LinkCard, footnote);
   `/reference/configuration/#vars-scheduler` exists and lists seven vars;
   the config tables still scroll horizontally on a narrow viewport without the
