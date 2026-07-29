@@ -189,6 +189,38 @@ parameter applied to searches, see
 for analytical reads expressed as SQL, see
 [analytics with SQL](/build/analytics-with-sql/).
 
+## Change history
+
+Where `pointInTime` answers *what did this look like then*, the change-history
+endpoint answers *who changed it, and when*:
+
+```
+GET /api/entity/{entityId}/changes
+```
+
+Each entry carries `changeType` (`CREATE`, `UPDATE`, or `DELETE`),
+`timeOfChange`, `transactionId`, and a `user` — the principal the change is
+**attributed** to, always present.
+
+As of cyoda-go v0.8.3 an entry also carries who actually performed it:
+
+- `attributedKind` — the kind of the attributed `user`: `user`, `service`, or
+  `system`.
+- `executedBy` — `{id, kind}` for the caller that actually executed the change,
+  independent of attribution.
+
+The two differ whenever an action happened *because of* someone but not *as*
+them. A processor cascading writes off a user's transition is attributed to
+that user while executing as a service; a scheduled transition firing hours
+later is attributed to whoever armed it. Reading `user` alone cannot tell a
+service-executed cascade from a direct user action — read both when that
+distinction matters. See
+[attribution is not authorization](/concepts/authentication-and-identity/#attribution-is-not-authorization)
+for how the platform captures it.
+
+Both fields are **absent** on rows written before v0.8.3 rather than present
+and `null`, so treat missing as "not recorded" rather than as a value.
+
 ## From a compute node
 
 When your code is reacting to a transition — running a processor or

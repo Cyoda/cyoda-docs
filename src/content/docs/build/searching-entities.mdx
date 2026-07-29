@@ -5,9 +5,11 @@ sidebar:
   order: 25
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="search" />
+<FromTheBinary topic="predicates" />
 
 Cyoda exposes search over REST for any query that returns a set of
 entities. Use it when you need more than one entity back, when the filter
@@ -24,44 +26,81 @@ counts and aggregates without the entity bodies, jump to
 Cyoda splits search into **Immediate** and **Background** modes. Pick by
 expected result size and urgency; the filter grammar is identical.
 
-- **Immediate** (API term: `direct`) — synchronous. The request returns
-  matching entities in the response body. Result size is **capped**, so
-  `direct` is the right default only when you know the filter produces
-  a bounded, small set: a UI list, a lookup, a small report. If a
-  query hits the cap, switch it to `async`.
+- **Immediate** (API term: `direct`) — synchronous. The request streams
+  matching entities back as NDJSON. It is **bounded-or-fail**: `limit`
+  caps the *matched set*, and a query matching more than that fails
+  outright rather than returning part of the answer. Use it when you
+  know the filter produces a bounded, small set — a UI list, a lookup,
+  a small report.
 - **Background** (API term: `async`) — queued. The request returns a
-  job handle; poll it to retrieve results. Result size is **unbounded**
-  and results are **paged**. On the Cassandra-backed tier (Cyoda Cloud,
-  or a licensed Enterprise install), `async` runs distributed across
+  job handle; poll it, then page the results. Result size is
+  **unbounded**. On the Cassandra-backed tier (Cyoda Cloud, or a
+  licensed Enterprise install), `async` runs distributed across
   the cluster: for a fixed query shape, throughput scales roughly
   linearly with the number of nodes.
+
+<Aside type="caution" title="Direct search fails rather than truncating">
+
+A direct search whose matched set exceeds the effective `limit` returns
+`400 SEARCH_RESULT_LIMIT`. It does **not** return the first `limit`
+entities. This is deliberate: a truncated page was indistinguishable
+from a complete one, so callers silently processed partial data.
+
+- `limit` defaults to **1000** when omitted, and caps at **10000**.
+- `limit=0` — which once meant "unbounded" — is rejected with
+  `400 BAD_REQUEST`, as is any value below 1. gRPC rejects `limit < 1`
+  identically.
+- A matched set exactly equal to `limit` succeeds.
+
+When you hit it, narrow the condition, raise `limit` within the maximum,
+or move the query to `async`.
+
+</Aside>
 
 The decision tree is short:
 
 - Small bounded result, UI-facing → `direct`.
-- Might be large, can tolerate a second or two of queuing, exports,
+- Might be large, can tolerate a second or two of queuing; exports,
   reports, batch jobs → `async`.
-- Hitting the cap or the request timeout on `direct` → `async`.
+- Hitting `SEARCH_RESULT_LIMIT` or the request timeout → `async`.
+- Ordered top-N over a large model → `async` (see
+  [sorting](#sorting-results)).
 
 ## A direct search
 
 Filter by a combination of entity fields and workflow state:
 
 ```bash
-curl -X POST http://localhost:8080/api/search/direct/orders/1 \
+curl -X POST 'http://localhost:8080/api/search/direct/orders/1?limit=200' \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "filter": {
-      "state": "submitted",
-      "customerId": "CUST-7"
-    }
+    "type": "group",
+    "operator": "AND",
+    "conditions": [
+      { "type": "lifecycle", "field": "state",
+        "operatorType": "EQUALS", "value": "submitted" },
+      { "type": "simple", "jsonPath": "$.customerId",
+        "operatorType": "EQUALS", "value": "CUST-7" }
+    ]
   }'
 ```
 
-The path is `/api/search/direct/{entityName}/{modelVersion}`. The response is
-the list of matching entities, each with its current state, revision, and
+The path is `/api/search/direct/{entityName}/{modelVersion}`, and the request
+body is the condition document itself — there is no wrapper object. `limit`,
+`pointInTime` and `trackingRead` are **query parameters**, not body fields.
+
+The response is `application/x-ndjson`: one complete entity envelope per line,
+each carrying `data` plus a `meta` block with the id, model key, state, and
 timestamps.
+
+```
+{"type":"ENTITY","data":{"customerId":"CUST-7"},"meta":{"id":"74807f00-…","state":"submitted","creationDate":"2026-03-01T10:00:00.000000000Z"}}
+{"type":"ENTITY","data":{"customerId":"CUST-7"},"meta":{"id":"89abc100-…","state":"submitted","creationDate":"2026-03-02T11:30:00.000000000Z"}}
+```
+
+Because it is a stream, parse it line by line rather than buffering the whole
+body as a single JSON document.
 
 ## An async search
 
@@ -73,21 +112,35 @@ curl -X POST http://localhost:8080/api/search/async/orders/1 \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "filter": { "state": "submitted" }
+    "type": "lifecycle",
+    "field": "state",
+    "operatorType": "EQUALS",
+    "value": "submitted"
   }'
 ```
 
-Poll the returned `jobId` until the job is ready, then fetch pages
-(`pageNumber` is zero-indexed; `pageSize` caps the page):
+The response is a bare UUID string — the job id. Poll its status until the job
+reports `SUCCESSFUL`, then page the results:
 
 ```
 GET /api/search/async/{jobId}/status
-GET /api/search/async/{jobId}/results?pageNumber=0&pageSize=1000
-GET /api/search/async/{jobId}/results?pageNumber=1&pageSize=1000
+GET /api/search/async/{jobId}?pageNumber=0&pageSize=1000
+GET /api/search/async/{jobId}?pageNumber=1&pageSize=1000
 ```
 
-A single `jobId` can be paged repeatedly until the result is
-expired; expiry is controlled per deployment.
+The status response carries `searchJobStatus` (`RUNNING`, `SUCCESSFUL`,
+`FAILED`, `CANCELLED`, or `NOT_FOUND`), `entitiesCount` for the total match
+count, and `expirationDate`. Fetching results before the job is `SUCCESSFUL`
+returns `400 BAD_REQUEST`.
+
+Results come back as a paged JSON object — `content` plus a `page` block with
+`number`, `size`, `totalElements` and `totalPages` — not as a stream. Job
+results expire 24 hours after creation; a single `jobId` can be paged
+repeatedly until then.
+
+Async search never returns `SEARCH_RESULT_LIMIT`: it snapshots the whole
+matched set and pages over it. An out-of-range `pageSize` or `pageNumber` is a
+plain `400 BAD_REQUEST`.
 
 ### Cancelling a job
 
@@ -96,33 +149,154 @@ query was submitted, the deployment is shutting down — cancel it rather
 than letting it run to completion:
 
 ```bash
-curl -X DELETE http://localhost:8080/api/search/async/{jobId}/cancel \
+curl -X PUT http://localhost:8080/api/search/async/{jobId}/cancel \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 Cancellation is cooperative: in-flight work is stopped at the next safe
 point and any partial results for that `jobId` are discarded.
 
-## Filter shape
+## The condition DSL
 
-The filter is a JSON document whose fields are entity field paths,
-metadata (`state`, `createdAt`, …), or workflow labels. The authoritative
-operator grammar — equality, comparisons, ranges, set membership, AND/OR
-combinators, nested-field access — lives in the
-[REST API reference](/reference/api/). The shape used in the simple
-examples above (flat field→value map) is the equality short form; use
-the full object form when you need operators:
+The request body is a **`Condition`** document. Every condition carries a
+`type` discriminator, and there are four of them. The same DSL is used by
+workflow and transition criteria, so what you learn here transfers directly.
+
+**`simple`** — match a JSONPath into the entity payload:
+
+```json
+{ "type": "simple", "jsonPath": "$.amount",
+  "operatorType": "GREATER_OR_EQUAL", "value": 1000 }
+```
+
+**`lifecycle`** — match entity metadata rather than payload. `field` is one of
+`state`, `creationDate`, `lastUpdateTime`, `transitionForLatestSave` (alias
+`previousTransition`), `transactionId`, `id`:
+
+```json
+{ "type": "lifecycle", "field": "state",
+  "operatorType": "EQUALS", "value": "submitted" }
+```
+
+**`group`** — combine conditions. `operator` is `AND` or `OR`; these are the
+only two, and `NOT` is not supported. Groups nest to a maximum depth of 50:
 
 ```json
 {
-  "and": [
-    { "field": "state", "eq": "submitted" },
-    { "field": "amount", "gte": 1000 }
+  "type": "group",
+  "operator": "AND",
+  "conditions": [
+    { "type": "lifecycle", "field": "state", "operatorType": "EQUALS", "value": "submitted" },
+    { "type": "simple", "jsonPath": "$.amount", "operatorType": "GREATER_OR_EQUAL", "value": 1000 }
   ]
 }
 ```
 
-For the full predicate grammar — every operator, nesting rule, and function — run `cyoda help search` against your binary.
+**`array`** — match positional values in a JSON array, where `null` matches any
+value at that index:
+
+```json
+{ "type": "array", "jsonPath": "$.laureates",
+  "values": ["John", null, "Hopfield"] }
+```
+
+`operatorType` also accepts the spellings `operator` and `operation`. The
+available operators are:
+
+| Group | Operators |
+|---|---|
+| Comparison | `EQUALS`, `NOT_EQUAL`, `GREATER_THAN`, `GREATER_OR_EQUAL`, `LESS_THAN`, `LESS_OR_EQUAL` |
+| Range | `BETWEEN`, `BETWEEN_INCLUSIVE` — `value` must be a two-element `[low, high]` array |
+| Presence | `IS_NULL`, `NOT_NULL` |
+| String | `CONTAINS`, `STARTS_WITH`, `ENDS_WITH` and their `NOT_*` inverses |
+| Case-insensitive | `IEQUALS`, `INOT_EQUAL`, `ICONTAINS`, `INOT_CONTAINS`, `ISTARTS_WITH`, `INOT_STARTS_WITH`, `IENDS_WITH`, `INOT_ENDS_WITH` |
+| Pattern | `LIKE` (anchored glob), `MATCHES_PATTERN` (anchored RE2 regex) |
+
+An operator outside this list is rejected with `400 BAD_REQUEST`, and the
+error detail includes the canonical list. `IS_CHANGED` and `IS_UNCHANGED` are
+change-generation operators, not search predicates — cyoda-go does not
+implement them.
+
+<Aside type="tip" title="Matching everything">
+
+An empty body (`{}`), or any body without a `type`, is rejected with
+`400 BAD_REQUEST`. To match every entity in the model, send a vacuous `AND`
+group:
+
+```json
+{ "type": "group", "operator": "AND", "conditions": [] }
+```
+
+An `AND` group with no conditions is `true`; an `OR` group with no conditions
+is `false`.
+
+</Aside>
+
+## Predicate semantics
+
+Search and workflow criteria run on **one shared evaluation kernel**, so a
+predicate means the same thing wherever you write it. The kernel implements
+Cyoda Cloud's model; `cyoda help predicates` is the exhaustive reference.
+
+**Comparison is type-directed and same-type.** An operand is parse-tested
+against the field's declared type(s), so the JSON number `30` and the string
+`"30"` behave identically. There is no cross-type coincidental matching: an
+operand that parses only as a number never matches a string-stored value.
+Numbers compare at arbitrary precision, so values beyond 2^53 are exact.
+
+**Absent and null fields never match a binary operator — including
+negatives.** `NOT_EQUAL`, `NOT_CONTAINS`, `INOT_*` and the rest are
+null-guarded to non-match rather than evaluated as `!positive`. A missing field
+does not satisfy `NOT_EQUAL` just because it fails `EQUALS`. Use `IS_NULL` and
+`NOT_NULL` to test presence — they are the only operators that do.
+
+**`LIKE` is a real anchored glob.** `%` matches any run of characters, `_`
+matches exactly one, and `\` escapes a literal `%`, `_` or `\`. The match is
+whole-string and case-sensitive. `MATCHES_PATTERN` is a whole-string-anchored
+RE2 regex; RE2 diverges from Java's dialect on constructs such as
+backreferences and some lookaround.
+
+**Temporal fields compare chronologically**, not lexically, across
+`LOCAL_DATE`, `LOCAL_DATE_TIME`, `LOCAL_TIME`, `ZONED_DATE_TIME`, `YEAR` and
+`YEAR_MONTH`. The `creationDate` and `lastUpdateTime` meta fields accept a
+*coarser* operand that upscales — `"2024"` or `"2024-09"` are valid against a
+full timestamp.
+
+**Validation is parse-based**, evaluated against the target model:
+
+- `400 CONDITION_TYPE_MISMATCH` — the operand parses into none of the field's
+  declared types. Comparison and range operators only; string operators and
+  presence tests carry no operand-type constraint.
+- `400 INVALID_FIELD_PATH` — the path is unknown to the model, or it names a
+  pure container (an object) and you used a scalar operator. Navigate to a
+  scalar leaf instead. A path seen as *both* an object and a scalar across
+  entities stays searchable via its scalar type. `IS_NULL`/`NOT_NULL` are
+  exempt, since they test presence rather than a value.
+- `400 INVALID_CONDITION` — a `null` operand on a binary or range operator, a
+  range operand that is not a two-element array, or an object operand.
+
+There is no operator-versus-type rejection: `CONTAINS` on a numeric field is a
+valid request that simply evaluates to a non-match.
+
+<Aside type="caution" title="Your existing queries may return different results">
+
+cyoda-go v0.8.3 converged two predicate evaluators that had drifted apart, so
+the same query could previously return different results depending on which
+one ran. Aligning them changed observable behaviour:
+
+- cross-type coincidental matches no longer occur;
+- negatives no longer match null or absent fields;
+- `LIKE` is a real glob on every backend, where SQL backends previously
+  neutered the wildcards;
+- `BETWEEN_INCLUSIVE` performs an inclusive range check, where
+  `Searcher`-backed stores previously fell through to a regex evaluation;
+- validation is parse-based, so some queries that used to fail now succeed,
+  and some that used to pass are now rejected.
+
+Re-check any query whose correctness you depend on, particularly negations and
+`LIKE` patterns.
+
+</Aside>
 
 ## Historical reads with `pointInTime`
 
@@ -135,13 +309,15 @@ time.
 
 The rule is canonical across every storage engine and read path: **inclusive of the requested instant** (`<=`), compared at native precision with no millisecond round-up.
 
+`pointInTime` is a **query parameter** (RFC 3339), not a body field:
+
 ```bash
-curl -X POST http://localhost:8080/api/search/direct/orders/1 \
+curl -X POST 'http://localhost:8080/api/search/direct/orders/1?pointInTime=2026-03-01T00:00:00Z' \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "pointInTime": "2026-03-01T00:00:00Z",
-    "filter": { "state": "submitted", "customerId": "CUST-7" }
+    "type": "lifecycle", "field": "state",
+    "operatorType": "EQUALS", "value": "submitted"
   }'
 ```
 
@@ -163,12 +339,48 @@ Both search endpoints (direct and async) accept sort keys. Over HTTP, add one or
 POST /api/search/direct/orders/1?sort=@state&sort=amount:desc
 ```
 
-Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`, and temporal chronologically. Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`. The number of sort keys per request is capped by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
+Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`, and temporal chronologically. Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`, as is exceeding the sort-key cap set by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
+
+<Aside type="caution" title="Ordered top-N belongs on the async path">
+
+Sorting a direct search does not let you take the top N of a large
+population. Because direct search is bounded-or-fail, the *whole matched set*
+must fit within `limit` before ordering is applied — so `sort` plus a small
+`limit` over a large model returns `400 SEARCH_RESULT_LIMIT` rather than the
+first N rows.
+
+Run these as async searches, which snapshot the full matched set and page over
+it in order.
+
+</Aside>
 
 ### Paging (async)
 
-- `pageSize` and `pageNumber` are query parameters on `/search/async/{jobId}/results`; they apply at result-fetch time, not at job submission. `pageNumber` is zero-indexed.
-- A completed `jobId` is stable for its retention window — page reads are idempotent.
+- `pageSize` and `pageNumber` are query parameters on `/search/async/{jobId}`; they apply at result-fetch time, not at job submission. `pageNumber` is zero-indexed.
+- A completed `jobId` is stable for its 24-hour retention window — page reads are idempotent.
+
+## Searching inside a transaction
+
+A search issued inside an active transaction is **read-your-own-writes
+correct**: it sees that transaction's uncommitted writes, without falling back
+to a full-model scan. The memory and SQLite backends overlay the transaction
+buffer on the committed stream; PostgreSQL runs the query natively on the
+transaction's own connection.
+
+By default the search is a plain snapshot read that records nothing. Pass
+`trackingRead=true` to opt into recording the entities the search **returns**
+into the transaction's read-set, so that a concurrent commit touching any of
+them aborts your transaction with `409 Conflict` at commit time:
+
+```
+POST /api/search/direct/orders/1?trackingRead=true
+```
+
+The protection is entity-level, the same as a `GetAll` read. Neither setting
+protects against **phantoms** — an entity that starts matching your predicate
+after the snapshot was taken is not detected either way. The flag is ignored
+outside a transaction, and async search does not expose it at all, since it
+runs detached.
 
 ## Performance notes
 
@@ -180,7 +392,9 @@ Ordering is **canonical across every backend**: text by byte order, numeric by I
   cheaper per entity than a series of `direct` pages.
 - Avoid open-ended `pointInTime` scans across every revision — anchor
   the query at a specific timestamp or a short window.
-- On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database, and `LIMIT`/`OFFSET` are pushed down when no residual filtering remains. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
+- On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
+- Pushdown is a **narrowing optimization only** — the in-process kernel remains authoritative for every match decision, so results never diverge between backends. Pushdown applies inside transactions too, so an in-transaction search no longer degrades into a full `GetAll` scan.
+- A condition the plugin cannot translate falls back to in-memory filtering after a full scan. If that residual scan examines more rows than the backend's budget allows, it fails with `400 SCAN_BUDGET_EXHAUSTED` — narrow the query or add an indexable predicate rather than retrying.
 
 ## Grouped statistics
 
@@ -226,7 +440,7 @@ The request has four parts:
   (defaults to `op(field)`, e.g. `sum($.amount)`). Every group also
   carries a `count` whether or not you request aggregations.
 - **`condition`** (optional) — a predicate that restricts the population,
-  using the **same** [Condition DSL](#filter-shape) as search.
+  using the **same** [condition DSL](#the-condition-dsl) as search.
 - **`limit`** (optional) — caps the number of buckets returned; must be
   ≤ the server's `CYODA_STATS_GROUP_MAX` (default 10000).
 

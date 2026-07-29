@@ -46,6 +46,46 @@ downstream authorization.
 The result: the audit trail records who the original user was at every hop,
 and each service still only sees a token scoped to what it is allowed to do.
 
+## Principal kinds
+
+Every principal carries an **explicit kind**: `user`, `service`, or `system`.
+The kind is recorded when the principal is established, not inferred later from
+the roles it happens to carry. Compute nodes see it as the `authtype` attribute
+on dispatched CloudEvents, and the platform **fails a dispatch closed** rather
+than sending an unset or unrecognized kind downstream.
+
+- `user` — a person, authenticated through an end-user flow.
+- `service` — a machine-to-machine technical account.
+- `system` — an internal platform trigger with no user context.
+
+## Attribution is not authorization
+
+Some actions happen because of a user, but not *as* that user. A processor
+writing other entities in reaction to someone's transition, or a scheduled
+transition firing hours after the write that armed it, both run without a
+live user request behind them.
+
+Cyoda keeps the two concerns separate:
+
+- **Execution** uses system or service authority. Nobody is impersonated and no
+  user's permissions are borrowed. What the follow-on action is *allowed* to do
+  does not depend on who caused it.
+- **Attribution** records the principal captured server-side when the follow-on
+  was created — the transaction's origin for a cascade, propagated unchanged
+  through every joined write including a cross-node proxied join; the identity
+  that armed the timer for a scheduled fire.
+
+Origin is **platform-set only**. No request field and no worker input can
+declare it, so attribution cannot be spoofed by a caller or a compute node.
+
+This matters when you read history. A change record carries both the attributed
+principal and the identity that actually executed it, so a service-executed
+cascade is never indistinguishable from a direct user action — see
+[the change history](/build/working-with-entities/#change-history). Before
+cyoda-go v0.8.3 the follow-on was recorded against whatever ran it: a cascade
+appeared as the compute service account, and a scheduled fire as a fabricated
+`"scheduler"` user, losing the human who set it off.
+
 ## External key trust and OIDC federation
 
 Cyoda can be configured to **trust tokens issued by external identity

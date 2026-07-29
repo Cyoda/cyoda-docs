@@ -1,7 +1,7 @@
 # Cyoda-Go v0.8.3 Documentation Update — Design
 
 **Date:** 2026-07-29
-**Status:** Approved (design); pending implementation plan
+**Status:** Implemented (2026-07-29) on `docs/release-v0-8-3`
 **Branch:** `docs/release-v0-8-3`
 **Scope:** Bring the docs site into line with everything delivered in the
 cyoda-go v0.8.3 milestone (19 issues), pin the site to v0.8.3, and complete
@@ -477,3 +477,63 @@ Grep pass for prose the release contradicts, across `reference/api.mdx`,
 None. All six decisions were settled before this spec was written; the one
 source divergence (schedule-function failure semantics) is resolved in favour
 of the binary, with the release-notes page reproducing the notes as authored.
+
+## Implementation notes (2026-07-29)
+
+Deviations from the design as written, all discovered during implementation:
+
+1. **Config seam reversed** — see the correction under Decisions #2. The
+   generator runs the pinned binary via the existing
+   `scripts/lib/cyoda-binary.js`; no maintainer command, no drift guard, no
+   tracked source file.
+
+2. **`searching-entities.mdx` was wrong beyond the DSL.** The audit found three
+   further contract errors that Part 3 also had to fix: async results are
+   `GET /api/search/async/{jobId}` (the page said `/results`), cancellation is
+   `PUT` (the page said `DELETE`), and direct search returns an
+   `application/x-ndjson` stream (the page described a JSON list). The
+   `#filter-shape` anchor was renamed to `#the-condition-dsl`, so the
+   grouped-statistics cross-reference was repointed.
+
+3. **`client-compute-nodes.md` renumbering went further than planned.** Adding
+   `# 8. Handling Function Requests` shifted sections 8–13 to 9–14 as expected,
+   but the *subsection* numbers had to be rebuilt too, since the new section's
+   `8.x` collided with the auth context's existing `8.x`. Renumbered
+   programmatically by order of appearance and all six cross-references fixed.
+
+4. **Keep-alive prose was falsified by v0.8.3.** The page stated that the
+   server responds to client-initiated keep-alives with an `EventAckResponse`.
+   `TestStreaming_InboundKeepAliveUpdatesLivenessNoEcho` pins the opposite: an
+   inbound keep-alive is liveness-only and draws no response. Corrected, with
+   the storm rationale, since a node that waits for that ack will hang.
+
+5. **Lifecycle criteria field list was incomplete** (`workflows-and-processors.mdx`).
+   It listed three fields; the binary accepts six, with `previousTransition` as
+   an alias for `transitionForLatestSave`. Corrected, plus the coarse-operand
+   temporal rule.
+
+6. **Predicate-semantics link** from `workflows-and-processors.mdx` initially
+   pointed at `/build/searching-entities/#predicate-semantics` before Part 3
+   existed; it was temporarily aimed at `/help/predicates/` and now points at
+   the real section.
+
+### Verification performed
+
+- `pnpm build` clean at pin 0.8.3; config reference 88 vars / 11 topics.
+- `pnpm run test:scripts` — 63/63.
+- Playwright `--project=chromium` (the only project CI runs) — 60 passed,
+  2 skipped, 0 failed.
+- **Site-wide link audit**: every internal href and every `#anchor` across all
+  219 built pages resolves — 0 broken. This caught the `#filter-shape` and
+  `#predicate-semantics` breakages above.
+
+### Known pre-existing issues, not addressed
+
+- `tests/help-mirror.spec.ts:12` fails under the local-only `Mobile Chrome`
+  project: `a[href^="/help/"]`.first() resolves to a sidebar link that is
+  collapsed (and so not `visible`) on mobile viewports. Scoping the locator to
+  the main content would fix it. Unrelated to v0.8.3 and outside CI's matrix.
+- Local `firefox` / `webkit` / `Mobile Safari` projects need
+  `pnpm exec playwright install`.
+- Astro telemetry cannot write to `~/Library/Preferences/astro` under the local
+  sandbox; builds need `ASTRO_TELEMETRY_DISABLED=1`.

@@ -503,9 +503,17 @@ Lifecycle criteria evaluate conditions on entity lifecycle properties rather tha
 
 #### Lifecycle Criteria Attributes
 
-- `field`: Lifecycle field to evaluate: `state`, `creationDate`, or `previousTransition`
+- `field`: Lifecycle field to evaluate — one of `state`, `creationDate`,
+  `lastUpdateTime`, `transitionForLatestSave` (accepted under its older name
+  `previousTransition`), `transactionId`, or `id`. Any other name is rejected
+  with `400 INVALID_FIELD_PATH`.
 - `operation`: Comparison operator
 - `value`: The value to compare against
+
+`creationDate` and `lastUpdateTime` are temporal and compare chronologically at
+millisecond resolution. They accept a coarser operand that upscales — `"2024"`
+or `"2024-09"` are valid against a full timestamp — and reject only an operand
+that parses into no temporal form at all.
 
 ### Array Criteria
 
