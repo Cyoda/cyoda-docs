@@ -156,17 +156,19 @@ Settled with Paul on 2026-07-29 before this spec was written:
    `docs/superpowers/`.
 6. **Fictional search DSL:** fixed as part of this update.
 
-### Release notes vs. binary help — one divergence
+### Release notes vs. binary help — divergence resolved upstream
 
-The release notes say a schedule-function callout against an unreachable
-compute node "surfaces a retryable `503`", alongside "the entity write still
-succeeds". `cmd/cyoda/help/content/workflows.md` is explicit that the callout
-runs **synchronously inside the entity-write transaction**, so a callout
-failure **fails that write** — "no state change commits against an
-unschedulable transition". Only the *born-expired* case lets the write succeed.
+The notes originally paired "surfaces a retryable `503`" for an unreachable
+compute node with "the entity write still succeeds" two sentences earlier,
+reading as though a `503` let the write commit.
+`cmd/cyoda/help/content/workflows.md` is explicit that the callout runs
+**synchronously inside the entity-write transaction**, so a callout failure
+**fails that write**; only the *born-expired* case lets it succeed.
 
-**The guide pages follow the binary.** The release-notes page reproduces the
-release notes as authored.
+Fixed upstream in cyoda-go `14d2d06` on 2026-07-29, before this spec was
+implemented. The notes now match the binary, so guide pages and the
+release-notes page agree and no reconciliation is needed. Part 2's fail-closed
+wording follows the corrected text.
 
 ## Design
 
