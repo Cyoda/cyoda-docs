@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import { Image } from 'astro:assets';
+import { Aside } from '@astrojs/starlight/components';
 import paymentRequestWorkflow from '../../../assets/payment-request-workflow.webp';
 
 > Understanding Cyoda JSON workflow configurations.
@@ -173,7 +174,8 @@ Transitions define allowed movements between states, optionally gated by conditi
   "manual": true,
   "disabled": false,
   "criterion": {},
-  "processors": []
+  "processors": [],
+  "schedule": {}
 }
 ```
 
@@ -185,10 +187,210 @@ Transitions define allowed movements between states, optionally gated by conditi
 - `disabled`: Marks the transition as inactive
 - `criterion`: Optional condition for eligibility
 - `processors`: Optional processing steps
+- `schedule`: Optional timer that fires the transition automatically — see
+  [Scheduled transitions](#scheduled-transitions). Mutually exclusive with
+  `manual: true`.
 
 ### Manual vs Automated Transitions
 
 Transitions may be either **manual** or **automated**, and are guarded by criteria that determine their eligibility. When an entity enters a new state, the first eligible automated transition is executed immediately within the same transaction. This continues recursively until no further **automated** transitions are applicable, resulting in a stable state. Each transition may trigger one or more attached processes, which can run synchronously or asynchronously, either within the current transaction or in a separate one. This forms the foundation for event flow automation, where processors may create or mutate entities in response, allowing a single transition to initiate a cascade of events and function executions across the system. `CYODA_MAX_STATE_VISITS` configures the per-state visit limit within a single cascade (default 10). A separate hard-coded safety cap of 100 steps limits total cascade depth across all states, preventing runaway automatic-transition chains.
+
+## Scheduled transitions
+
+A third kind of transition fires on a **timer**. Give a transition a `schedule`
+object and it fires on its own at a computed time, driven by a background
+scheduler independently of any API call or cascade. Timers are durable, stored
+by the backend (memory, SQLite, or PostgreSQL) and armed or cancelled
+atomically with the entity write that triggered them.
+
+Use it for deadlines and delays that belong to the domain: auto-close a ticket
+after 24 hours of inactivity, escalate an unpaid invoice at its due date, expire
+a reservation, or poll an external system on a fixed cadence.
+
+There are two timing modes, and exactly one of them is required whenever
+`schedule` is present. `schedule` is also mutually exclusive with
+`manual: true` — a scheduled transition is by definition not manually fired.
+
+### Static timing — the same delay for every entity
+
+`delayMs` fires the transition `delayMs` after the entity enters the source
+state:
+
+```json
+{
+  "name": "AutoClose",
+  "next": "Closed",
+  "manual": false,
+  "schedule": {
+    "delayMs": 86400000,
+    "timeoutMs": 600000
+  }
+}
+```
+
+- `delayMs` (integer, required in this mode) — milliseconds between source-state
+  entry and the scheduled time. Must be greater than `0`.
+- `timeoutMs` (integer, optional) — how late the scheduler may still pick the
+  timer up before giving up. It is **not** a second delay: it measures lateness
+  past the scheduled time, independent of `delayMs`. Absent means no limit; an
+  explicit `0` is strictest, dropping the timer on any lateness at all.
+
+### Per-entity timing — a Function callout
+
+A static delay fires every entity at the same offset. When the deadline lives on
+the entity — an `expiresAt` field, a per-customer SLA, a user-chosen reminder —
+use `function` instead, which asks a compute node to compute the time per
+entity:
+
+```json
+{
+  "name": "Escalate",
+  "next": "Escalated",
+  "manual": false,
+  "schedule": {
+    "function": {
+      "name": "compute-escalation-time",
+      "resultKind": "Schedule",
+      "calculationNodesTags": "escalation-service",
+      "attachEntity": true
+    }
+  }
+}
+```
+
+- `name` (required) — the registered function name.
+- `resultKind` (required) — must be `"Schedule"`.
+- `calculationNodesTags` (required) — comma-separated routing tags, exactly as
+  for a processor or criterion.
+- `attachEntity` (optional, default `true`) — whether the entity payload is
+  attached to the request.
+- `context` (optional) — a pass-through string forwarded verbatim as the
+  request's `parameters`.
+- `responseTimeoutMs` (optional) — response timeout for this callout.
+
+This is a **Function** callout — a third shape alongside Processor (mutates the
+entity) and Criterion (returns a boolean) that returns a declared typed value
+and mutates nothing. See
+[handling function requests](/build/client-compute-nodes/) for the compute-node
+side. The node replies with a `Schedule` result:
+
+```json
+{ "fireAfterMs": 3600000, "expireAfterMs": 600000 }
+```
+
+- **Fire time** (required) — exactly one of `fireAt` (absolute epoch-ms) or
+  `fireAfterMs` (relative to arm time). A time already in the past is not an
+  error; the transition is simply due immediately.
+- **Expiry** (optional) — at most one of `expireAt` (absolute) or
+  `expireAfterMs` (relative to the *resolved fire time*, not to arm time). Both
+  absent means no expiry. A resolved expiry after the fire time becomes the
+  `timeoutMs` lateness window — the gap between the two.
+
+<Aside type="caution" title="The callout runs inside your write">
+
+The schedule function is invoked **synchronously, inside the transaction of the
+entity write that arms it**. A callout failure therefore fails that write: an
+unreachable, disconnected, or timed-out compute node returns a retryable `503`
+(`NO_COMPUTE_MEMBER_FOR_TAG`, `DISPATCH_TIMEOUT`,
+`COMPUTE_MEMBER_DISCONNECTED`), and a malformed or wrong-kind result returns
+`500 SCHEDULE_FUNCTION_INVALID_RESULT`. No state change commits against a
+transition that could not be scheduled — there is no silent skip.
+
+The one case where the write still succeeds is **born expired**: if the resolved
+expiry falls at or before the resolved fire time, the transition is simply never
+armed, any prior scheduling for it is cancelled, and a
+`SCHEDULED_TRANSITION_EXPIRE` audit event is recorded.
+
+</Aside>
+
+### How the timer behaves
+
+Both timing modes share the same engine behaviour.
+
+**Arming happens on every settled write.** The timer is armed when the entity
+enters the source state — and re-armed on *every* subsequent write that leaves
+it in that state, including a routine data update or a self-loop. Each re-arm
+fully replaces the previous scheduling decision, and in function mode it makes a
+fresh callout.
+
+<Aside type="caution" title="Busy entities never fire">
+
+Because arming resets on every settled write, an entity written more often than
+its scheduled interval **never reaches its fire time**. If you are modelling
+"escalate 30 minutes after entry", routine touch-writes on a busy entity will
+postpone that escalation indefinitely — and, in function mode, make a callout
+every time. Model deadlines that must survive activity as an absolute `fireAt`
+computed from a field on the entity, not as a relative delay.
+
+</Aside>
+
+**The criterion is evaluated exactly once, at fire time.** A `true` (or absent)
+criterion fires the transition normally — processors run, the state advances,
+`TRANSITION_MAKE` is recorded. A `false` criterion **declines** it: the entity
+stays put and the timer is *not* retried. This is a deliberate one-shot, not a
+poll.
+
+**Lateness is bounded by `timeoutMs`.** If the scheduler picks up a due timer
+more than `timeoutMs` past its scheduled time, the timer is dropped without
+evaluating the criterion and the transition never fires. With no `timeoutMs`,
+there is no upper bound — it fires whenever it is eventually picked up.
+
+**A scheduled transition is not manually fireable.** Naming one in an explicit
+transition request returns `400 TRANSITION_NOT_FOUND`, with a detail explaining
+that it fires automatically. To allow early firing, give the state an ordinary
+manual transition alongside the scheduled one.
+
+**Everything is audited.** Arming, firing, expiry, and cancellation each emit a
+dedicated event — `SCHEDULED_TRANSITION_ARM`, `SCHEDULED_TRANSITION_FIRE`
+(alongside the ordinary `TRANSITION_MAKE`), `SCHEDULED_TRANSITION_EXPIRE`, and
+`SCHEDULED_TRANSITION_CANCEL` when the entity leaves the source state before the
+timer fires. A loopback that re-arms the same state emits only `ARM`.
+
+### One-shot, or polling?
+
+Since the criterion is evaluated once per fire, there is no built-in
+retry-until-true. Three shapes cover the common cases:
+
+- **A deadline gate** — a criterion on the scheduled transition. At the
+  deadline, fire if the condition holds, otherwise abandon. A `false` criterion
+  is a deliberate decline.
+- **A recurring heartbeat** — an unconditional scheduled cycle
+  (`S1 →scheduled→ S2 →scheduled→ S1`), which fires every `delayMs`, forever,
+  for every entity in the cycle.
+- **Poll until a condition holds** — an *unconditional* scheduled tick into a
+  state whose **ordinary** (non-scheduled) transitions carry the condition and
+  exit when it is met. The retry loop lives in the workflow structure, not in
+  the timer.
+
+The last two are cycles, and the import-time cycle detector rejects unguarded
+automated cycles by default — a delayed cycle is still a cycle. Set
+`allowCycles: true` on the import request body to accept one:
+
+```json
+{
+  "importMode": "REPLACE",
+  "allowCycles": true,
+  "workflows": []
+}
+```
+
+### Operational configuration
+
+The scheduler runs on a coordinator elected across the cluster (by default the
+member with the lowest node ID), which scans for due timers and distributes them
+to peers. Seven environment variables tune it —
+`CYODA_SCHEDULER_ENABLED`, `CYODA_SCHEDULER_SCAN_INTERVAL`,
+`CYODA_SCHEDULER_BATCH_SIZE`, `CYODA_SCHEDULER_DISTRIBUTION`,
+`CYODA_SCHEDULER_COORDINATOR`, `CYODA_SCHEDULER_REDISPATCH_BACKOFF`, and
+`CYODA_SCHEDULER_EXPIRY_GRACE`. See the
+[configuration reference](/reference/configuration/#vars-scheduler), or run
+`cyoda help config scheduler`.
+
+One of these matters for correctness rather than throughput:
+`CYODA_SCHEDULER_EXPIRY_GRACE` (default `100ms`) is a grace band above
+`timeoutMs` that separates expiry from firing, so clock skew between nodes
+cannot produce a contradictory expire-and-fire. Size it to at least your maximum
+expected inter-node skew.
 
 ## Criteria
 
@@ -334,11 +536,20 @@ The following comparison operators are available for simple, lifecycle, and arra
 
 **Case-Insensitive String Operations:** `IEQUALS`, `INOT_EQUAL`, `ICONTAINS`, `INOT_CONTAINS`, `ISTARTS_WITH`, `INOT_STARTS_WITH`, `IENDS_WITH`, `INOT_ENDS_WITH`
 
-**State Tracking:** `IS_UNCHANGED`, `IS_CHANGED`
+`IS_CHANGED` and `IS_UNCHANGED` are change-generation operators rather than
+search predicates, and cyoda-go does not implement them. For the full
+evaluation model — type-directed comparison, null handling, the `LIKE` grammar
+— see [`cyoda help predicates`](/help/predicates/); criteria and search share
+one kernel, so the rules are identical.
 
 ## Processors
 
-Processors implement custom logic to run during transitions. There are two types of processors: **externalized** (delegated to calculation nodes) and **scheduled** (delayed transitions).
+Processors implement custom logic to run during transitions. All processors are
+**externalized** — delegated to a calculation node over gRPC.
+
+To fire a transition on a delay rather than on an API call or a cascade, you do
+not attach a processor: you put a [`schedule`](#scheduled-transitions) on the
+transition itself.
 
 ### Externalized Processors
 
@@ -365,7 +576,10 @@ Externalized processors delegate execution to a calculation node via gRPC. This 
 - `name`: Name of the processor (required)
 - `executionMode`: Execution mode (see below). Default: `ASYNC_NEW_TX`.
 - `config`: Configuration for the processor call:
-- `attachEntity`: Whether to attach entity data to the processor call. Set to `true` if the processor needs access to the entity data (this is usually the case).
+- `attachEntity`: Whether to attach entity data to the processor call.
+  **Defaults to `true`** as of cyoda-go v0.8.3 — a processor that omits the
+  field is imported with the payload attached, matching `schedule.function` and
+  the criterion `function` callout. Set it to `false` explicitly to opt out.
 - `calculationNodesTags`: Comma-separated list of tags for routing to specific calculation nodes
 - `responseTimeoutMs`: Response timeout in milliseconds
 - `retryPolicy`: Retry policy for the processor
@@ -382,31 +596,6 @@ Externalized processors delegate execution to a calculation node via gRPC. This 
 Processors should be idempotent; failed ASYNC_NEW_TX processors may be retried.
 
 Synchronous executions run immediately and block the current processing thread on the same node, making them local and non-distributed. In contrast, asynchronous executions are scheduled for deferred processing and can be handled by any node in the cluster, enabling horizontal scalability and workload distribution, albeit with possibly somewhat higher latency.
-
-### Scheduled Transition Processors
-
-Scheduled processors trigger a delayed transition after a configured time period.
-
-```json
-{
-  "type": "scheduled",
-  "name": "schedule_timeout",
-  "config": {
-    "delayMs": 3600000,
-    "transition": "timeout",
-    "timeoutMs": 7200000
-  }
-}
-```
-
-#### Scheduled Processor Attributes
-
-- `type`: `"scheduled"` (discriminator)
-- `name`: Name of the processor (required)
-- `config` (required):
-- `delayMs`: Delay in milliseconds before executing the transition (required)
-- `transition`: The name of the transition to execute after waiting (required)
-- `timeoutMs`: Timeout in milliseconds for executing the transition task, after which it will be expired (optional)
 
 ### Calculation Nodes Tags
 
