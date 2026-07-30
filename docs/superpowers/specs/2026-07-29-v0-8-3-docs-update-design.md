@@ -537,3 +537,62 @@ Deviations from the design as written, all discovered during implementation:
   `pnpm exec playwright install`.
 - Astro telemetry cannot write to `~/Library/Preferences/astro` under the local
   sandbox; builds need `ASTRO_TELEMETRY_DISABLED=1`.
+
+## Code review round 1 (2026-07-29)
+
+Reviewed against the binary's help content and Go source. All seven substantive
+findings verified true and fixed; nothing was pushed back on.
+
+**Critical**
+1. `client-compute-nodes.md` §8.1 described the function request as
+   "structurally the same as a processor request" and omitted
+   `functionId`/`functionName`/`workflow`, which
+   `EntityFunctionCalculationRequest.json` lists as `required`. There is no
+   `processorName` on that message, so a reader had no routing key. Replaced
+   with a full field table naming `functionName` as the discriminator.
+
+**Important**
+2. A stale "Timing parameters" table (probe 1,000 ms / max idle 3,000 ms) sat
+   immediately below the new keep-alive paragraph, contradicting it 10x, and
+   described a soft "marked not alive, recovers on next probe" state that
+   cyoda-go does not implement (`grpc.md:370-373`, `codes.DeadlineExceeded`).
+   Replaced with the real `CYODA_KEEPALIVE_INTERVAL`/`_TIMEOUT` values and the
+   reconnect pointer.
+3. `authclaims` was documented as a JSON object with a `Map.class` parse
+   example. `internal/grpc/cloudevent.go:84-89` sends
+   `strings.Join(uc.Roles, ",")`. The example threw on real input. Corrected,
+   with a note that Cloud has historically sent JSON.
+4. Unknown lifecycle field in a *criterion* was given as
+   `400 INVALID_FIELD_PATH`; criteria validate at import and wrap as
+   `400 VALIDATION_FAILED` (`workflow/validate.go:286`). Both codes now stated
+   with their contexts.
+5. "there are four of them" for condition types was a false completeness claim
+   — `FunctionCondition` is a fifth (`search.md:132-154`). Added, with the
+   post-filter cost called out.
+6. `responseTimeoutMs` default given as `60000`/60 s; the engine constant is
+   `30000` (`internal/grpc/dispatch.go:32`). Pre-existing, in an edited table.
+7. **Undisclosed deviation**: the #399 postgres-boolean note specified in
+   Part 3 was dropped from the search page. Added.
+
+**Minor** — all applied: predicate-semantics link repointed at the prose
+section; the function-requests link anchored; `.gitignore` comment updated for
+the retired source file; `transactionId`/`fieldsChangedCount` marked
+conditional; the criterion-reason default scoped to the audit trail (the `400`
+detail is left bare); sort-vs-comparison ordering distinguished; a
+`one of delayMs | function` hint added to the schedule block; §10.4 retitled
+`type: function` to avoid colliding with the new §8 sense of "Function".
+Also swept `working-with-entities.mdx`, whose Search section still described
+`direct` as merely "capped".
+
+**Review pattern worth carrying forward:** two of the three highest-severity
+findings were *pre-existing text left adjacent to new text*. The link/anchor
+audit cannot catch a stale table three paragraphs below an edit. When editing a
+section, re-read the surrounding ~20 lines against the binary.
+
+**Upstream follow-up:** `help/content/workflows.md:415` lists three lifecycle
+criteria fields where `internal/match/match.go:147-169` accepts six. This repo's
+docs are now correct against source but diverge from the binary's own help —
+worth an issue on cyoda-go.
+
+Re-verified after fixes: build clean, `test:scripts` 63/63, Playwright chromium
+60 passed / 2 skipped / 0 failed, site-wide link+anchor audit 0 broken.

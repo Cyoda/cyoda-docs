@@ -303,17 +303,18 @@ closes the stream if it sees nothing from you within
 every `CYODA_KEEPALIVE_INTERVAL` seconds (default `10`).
 
 **Timing parameters** (server-side defaults):
-| Parameter | Default | Description |
+
+| Variable | Default | Description |
 |---|---|---|
-| Keep-alive probe interval | 1,000 ms | How often the server probes |
-| Max idle interval | 3,000 ms | How long before a member is marked as not alive |
-| Keep-alive check timeout | 1,000 ms | How long the server waits for a probe response |
+| `CYODA_KEEPALIVE_INTERVAL` | `10` s | Interval between server-sent keep-alive probes. |
+| `CYODA_KEEPALIVE_TIMEOUT` | `30` s | Inactivity after which the server **terminates the stream**. |
 
-A member is marked not alive when a probe times out (keep-alive check timeout, default 1,000 ms) **and** the max idle interval (default 3,000 ms) has been exceeded since the last successful probe response. Both conditions must hold — a single slow probe within the idle window does not mark the member dead.
-
-**If your member is marked as not alive, the platform will not route requests to it.** The member remains registered but idle. Responding to a subsequent keep-alive probe restores the alive status.
-
-> ⚠️ **Critical**: Failing to respond to keep-alive probes will cause your member to be marked as dead. Ensure your keep-alive response handler is fast and non-blocking.
+> ⚠️ **Going idle costs you the stream, not just routing.** There is no
+> intermediate "marked not alive but still registered" state that a later probe
+> recovers from — exceeding `CYODA_KEEPALIVE_TIMEOUT` closes the stream with
+> `DeadlineExceeded`. Keep your keep-alive handler fast and non-blocking, and
+> implement the reconnection logic in [Section 12.1](#121-reconnection-strategy);
+> it is the only way back.
 
 ---
 
@@ -507,10 +508,10 @@ Where it surfaces depends on how the criterion was reached:
   `{workflowName, transition, criterion, reason}` in its `data`, and
   `WORKFLOW_SKIP` carries `{workflowName, reason}`.
 
-Reasons are capped at **2 KiB**. An omitted reason defaults to
-`"criterion did not match"`, so a blocked transition is never unexplained —
-but the default tells nobody anything. Write the specific cause:
-`"order total 4200 exceeds the 1000 auto-approval limit"` beats
+Reasons are capped at **2 KiB**. If you omit one, the *audit trail* falls back
+to `"criterion did not match"` while the `400` detail is left bare — so an
+omitted reason really does leave the caller with nothing. Write the specific
+cause: `"order total 4200 exceeds the 1000 auto-approval limit"` beats
 `"validation failed"`.
 
 ---
@@ -533,10 +534,21 @@ caller can validate what it receives.
 
 ## 8.1 Request Schema
 
-The request is an `EntityFunctionCalculationRequest`, structurally the same as
-a processor request — `requestId`, `entityId`, the optional entity `payload`
-(present when `attachEntity` is `true`), and `parameters` carrying the
-configured `context` string.
+The request is an `EntityFunctionCalculationRequest`. It mirrors a processor
+request, but the callout target is named by **`functionId` / `functionName`** —
+there is no `processorName` on this message, so route on `functionName`.
+
+| Field | Required | Description |
+|---|---|---|
+| `requestId` | YES | Echo back unchanged. |
+| `entityId` | YES | Echo back unchanged. |
+| `functionId` | YES | Identifier of the invoked function. |
+| `functionName` | YES | **The routing key** — the registered `schedule.function.name`. Dispatch on this. |
+| `workflow` | YES | The workflow this callout belongs to. |
+| `transition` | NO | The transition carrying the schedule. |
+| `transactionId` | NO | The originating transaction. |
+| `payload` | NO | The entity data — present only when `attachEntity` is `true`. |
+| `parameters` | NO | The configured `context` string, forwarded verbatim. |
 
 ## 8.2 Response Schema
 
@@ -593,7 +605,7 @@ The auth context is carried as CloudEvent extension attributes in the Protobuf `
 |---|---|---|---|
 | `authtype` | String | YES | Principal kind. Exactly one of: `user`, `service`, `system` |
 | `authid` | String | NO | Unique identifier of the principal (UUID). Absent for `system`. |
-| `authclaims` | String | NO | JSON string containing claims about the principal (e.g., `legalEntityId`, `roles`). Does not contain credentials. |
+| `authclaims` | String | NO | **Comma-separated role names** on cyoda-go (e.g. `ROLE_ADMIN,ROLE_USER`). Absent when the principal has no roles. Never contains credentials. |
 
 ## 9.2 Auth Type Values
 
@@ -639,16 +651,14 @@ String authType = value.getAttributesMap().get("authtype").getCeString();
 String authId = value.getAttributesMap().containsKey("authid")
     ? value.getAttributesMap().get("authid").getCeString()
     : null;
-String authClaimsJson = value.getAttributesMap().containsKey("authclaims")
+String authClaims = value.getAttributesMap().containsKey("authclaims")
     ? value.getAttributesMap().get("authclaims").getCeString()
     : null;
 
-// Parse claims if present
-if (authClaimsJson != null) {
-    Map<String, Object> claims = objectMapper.readValue(authClaimsJson, Map.class);
-    String legalEntityId = (String) claims.get("legalEntityId");
-    List<String> roles = (List<String>) claims.get("roles");  // may be null for plain IUser
-}
+// cyoda-go sends roles as a comma-separated string, NOT JSON.
+List<String> roles = (authClaims == null || authClaims.isEmpty())
+    ? List.of()
+    : Arrays.asList(authClaims.split(","));
 ```
 
 The exact accessor depends on your gRPC tooling — in Go, use the generated message's `GetAttributes()` method; in Python, dict-like indexing on `.attributes`. See your language's generated proto bindings.
@@ -662,20 +672,25 @@ fail *open* on exactly those cases.
 
 ## 9.4 Example Claims JSON
 
-```json
-{
-  "legalEntityId": "acme-corp",
-  "roles": ["USER", "SUPER_USER"]
-}
+On cyoda-go, `authclaims` is a flat comma-separated list of role names:
+
+```
+ROLE_USER,ROLE_SUPER_USER
 ```
 
-For `service` (M2M) principals:
-```json
-{
-  "legalEntityId": "acme-corp",
-  "roles": ["M2M"]
-}
+For a `service` (M2M) principal:
+
 ```
+ROLE_M2M
+```
+
+> ⚠️ **Do not parse this as JSON.** `objectMapper.readValue(authClaims, Map.class)`
+> throws on `ROLE_USER,ROLE_SUPER_USER`. Split on `,`. Go clients should use
+> `authctx.Roles`, which does exactly this.
+>
+> Cyoda Cloud has historically sent a richer JSON claims object including
+> `legalEntityId`. If you target both, branch on whether the value starts with
+> `{` rather than assuming either shape.
 
 ## 9.5 Use Cases
 
@@ -733,7 +748,7 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 | `executionMode` | string | — | **Required.** One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`, `COMMIT_BEFORE_DISPATCH`. |
 | `config.attachEntity` | boolean | `true` | Whether to send entity data in the request payload. **Changed in v0.8.3:** a processor that omits this field is now imported with `attachEntity: true`. Set it to `false` explicitly to opt out. |
 | `config.calculationNodesTags` | string | `""` | Comma/semicolon-separated tags. Only members whose tags are a superset are eligible. |
-| `config.responseTimeoutMs` | long | `60000` | How long the platform waits for your response before timing out. |
+| `config.responseTimeoutMs` | long | `30000` | How long the platform waits for your response before timing out. |
 | `config.retryPolicy` | string | `FIXED` | `NONE` — no retry. `FIXED` — retry with fixed delay (default: 3 retries, 500ms delay). |
 | `config.context` | string | `null` | Arbitrary string passed as `parameters` in the request. Use for handler-specific configuration. |
 | `config.asyncResult` | boolean | `false` | Enable async response processing (advanced). |
@@ -768,7 +783,7 @@ Three environment variables tune this (full list in the [configuration reference
 - `CYODA_GRPC_NODE_ADDR` — this node's gRPC endpoint advertised to peers (`host:port`, no scheme), used for B→A forwarding.
 - `CYODA_COMPUTE_HTTP_BASE` — base URL of the cyoda instance a compute node calls back into (compute-client side).
 
-## 10.4 Externalized Criteria (Function) in Workflow JSON
+## 10.4 Externalized Criteria (`type: function`) in Workflow JSON
 
 ```json
 {
@@ -863,7 +878,7 @@ synchronized (requestObserver) {
 
 ## 12.3 Response Timeouts
 
-Your client must respond within the configured `responseTimeoutMs` (default: 60 seconds). If you exceed this:
+Your client must respond within the configured `responseTimeoutMs` (default **30 seconds** — `defaultResponseTimeoutMs` in the engine). If you exceed this:
 - The platform considers the request failed.
 - If retry policy is `FIXED`, the platform retries with a different member.
 - Late responses are silently discarded.
@@ -936,7 +951,7 @@ Client                                          Server
 | `UNAUTHENTICATED` on stream open | Missing/invalid/expired JWT token | Refresh JWT before connecting. Ensure `Authorization: Bearer <token>` header. |
 | `NOT_FOUND` after JWT validation | User not found in Cyoda for the given JWT | Verify user enrollment and legal entity configuration. |
 | Greet event has `success: false` | Subscription limit exceeded (max client nodes) | Check your subscription plan limits. |
-| Member marked as not alive | Keep-alive responses too slow or missing | Ensure non-blocking, fast keep-alive handler. Check network latency. |
+| Stream closed with `DeadlineExceeded` | Nothing sent within `CYODA_KEEPALIVE_TIMEOUT` (default 30 s) | Ensure a non-blocking, fast keep-alive handler; check network latency. Reconnect per [Section 12.1](#121-reconnection-strategy). |
 | Requests not arriving | Tags mismatch | Verify your member's tags are a superset of the workflow processor's `calculationNodesTags`. Tags are case-insensitive. |
 | Requests not arriving | Member on wrong legal entity | Requests only route to members in the same legal entity as the entity owner. |
 | Request timeout | Business logic too slow | Optimize processing time or increase `responseTimeoutMs` in workflow config. |

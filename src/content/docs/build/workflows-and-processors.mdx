@@ -175,7 +175,7 @@ Transitions define allowed movements between states, optionally gated by conditi
   "disabled": false,
   "criterion": {},
   "processors": [],
-  "schedule": {}
+  "schedule": {}          // one of delayMs | function
 }
 ```
 
@@ -271,7 +271,7 @@ entity:
 This is a **Function** callout — a third shape alongside Processor (mutates the
 entity) and Criterion (returns a boolean) that returns a declared typed value
 and mutates nothing. See
-[handling function requests](/build/client-compute-nodes/) for the compute-node
+[handling function requests](/build/client-compute-nodes/#8-handling-function-requests) for the compute-node
 side. The node replies with a `Schedule` result:
 
 ```json
@@ -505,8 +505,10 @@ Lifecycle criteria evaluate conditions on entity lifecycle properties rather tha
 
 - `field`: Lifecycle field to evaluate — one of `state`, `creationDate`,
   `lastUpdateTime`, `transitionForLatestSave` (accepted under its older name
-  `previousTransition`), `transactionId`, or `id`. Any other name is rejected
-  with `400 INVALID_FIELD_PATH`.
+  `previousTransition`), `transactionId`, or `id`. Any other name is rejected at
+  import with `400 VALIDATION_FAILED`. (The same mistake in a *search* request
+  body is `400 INVALID_FIELD_PATH` — criteria are validated at import, searches
+  at request time.)
 - `operation`: Comparison operator
 - `value`: The value to compare against
 
@@ -547,8 +549,8 @@ The following comparison operators are available for simple, lifecycle, and arra
 `IS_CHANGED` and `IS_UNCHANGED` are change-generation operators rather than
 search predicates, and cyoda-go does not implement them. For the full
 evaluation model — type-directed comparison, null handling, the `LIKE` grammar
-— see [`cyoda help predicates`](/help/predicates/); criteria and search share
-one kernel, so the rules are identical.
+— see [predicate semantics](/build/searching-entities/#predicate-semantics);
+criteria and search share one kernel, so the rules are identical.
 
 ## Processors
 

@@ -159,8 +159,8 @@ point and any partial results for that `jobId` are discarded.
 ## The condition DSL
 
 The request body is a **`Condition`** document. Every condition carries a
-`type` discriminator, and there are four of them. The same DSL is used by
-workflow and transition criteria, so what you learn here transfers directly.
+`type` discriminator. The same DSL is used by workflow and transition criteria,
+so what you learn here transfers directly.
 
 **`simple`** — match a JSONPath into the entity payload:
 
@@ -199,6 +199,38 @@ value at that index:
 { "type": "array", "jsonPath": "$.laureates",
   "values": ["John", null, "Hopfield"] }
 ```
+
+**`function`** — delegate the predicate to a compute node. The condition is
+dispatched as an `EntityCriteriaCalculationRequest`, exactly like a workflow
+criterion:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "my-criteria-fn",
+    "config": {
+      "calculationNodesTags": "approval-service",
+      "attachEntity": true,
+      "responseTimeoutMs": 30000
+    }
+  }
+}
+```
+
+`function.name` and `config.calculationNodesTags` are required for routing;
+`attachEntity` defaults to `true` and `responseTimeoutMs` to `30000`.
+
+<Aside type="caution" title="A function condition cannot be pushed down">
+
+`function` is the one condition type that never translates to a storage-plugin
+filter. It always runs as a **post-filter with in-memory entity loading**, so
+every candidate entity is materialised and dispatched to your compute node.
+Combine it with a selective `simple` or `lifecycle` condition in an `AND` group
+so the pushdown narrows the population first — a bare `function` condition over
+a large model means one callout per entity.
+
+</Aside>
 
 `operatorType` also accepts the spellings `operator` and `operation`. The
 available operators are:
@@ -339,7 +371,7 @@ Both search endpoints (direct and async) accept sort keys. Over HTTP, add one or
 POST /api/search/direct/orders/1?sort=@state&sort=amount:desc
 ```
 
-Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`, and temporal chronologically. Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`, as is exceeding the sort-key cap set by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
+Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`. Meta date fields order chronologically; temporal *data* paths are ordered as text, which for ISO-8601 values coincides with chronological order. Note that this is the **sort** contract — predicate *comparison* uses the arbitrary-precision, type-directed rules described under [predicate semantics](#predicate-semantics). Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`, as is exceeding the sort-key cap set by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
 
 <Aside type="caution" title="Ordered top-N belongs on the async path">
 
@@ -394,6 +426,7 @@ runs detached.
   the query at a specific timestamp or a short window.
 - On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
 - Pushdown is a **narrowing optimization only** — the in-process kernel remains authoritative for every match decision, so results never diverge between backends. Pushdown applies inside transactions too, so an in-transaction search no longer degrades into a full `GetAll` scan.
+- Boolean conditions on PostgreSQL are pushed down correctly as of v0.8.3. Previously an `EQUALS`/`NOT_EQUAL` against a boolean field returned `500`, because the planner bound a raw Go `bool` against a text-typed JSON extraction that the driver cannot encode.
 - A condition the plugin cannot translate falls back to in-memory filtering after a full scan. If that residual scan examines more rows than the backend's budget allows, it fails with `400 SCAN_BUDGET_EXHAUSTED` — narrow the query or add an indexable predicate rather than retrying.
 
 ## Grouped statistics

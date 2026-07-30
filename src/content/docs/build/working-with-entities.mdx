@@ -153,10 +153,12 @@ Supplying the condition matters: earlier releases ignored it and wiped the entir
 
 Cyoda supports two query modes:
 
-- **Direct** (synchronous, capped result size) — API term `direct`.
-  Returns right away. Good for UI lookups and short operations.
-  Result size is capped, so `direct` is best for queries that produce
-  a bounded, small result set.
+- **Direct** (synchronous, bounded-or-fail) — API term `direct`.
+  Streams results right away as NDJSON. Good for UI lookups and short
+  operations. `limit` caps the *matched set* (default 1000, max 10000) and a
+  query matching more than that returns `400 SEARCH_RESULT_LIMIT` rather than a
+  truncated page — so `direct` suits queries you know produce a bounded, small
+  result set.
 - **Async** (background, unbounded, paged) — API term `async`.
   Queued as a job, returns a handle you can poll. Result size is
   unbounded; results are paged. Good for large result sets, periodic
@@ -167,8 +169,9 @@ Cyoda supports two query modes:
 
 Both accept the same filter grammar over entity fields, metadata, and
 workflow state. Pick `direct` by default; switch to `async` when a
-query would hit the `direct` result cap, would time out, or would hold
-resources you need elsewhere. For predicates, pagination, and worked
+query would exceed the `direct` limit, would time out, or would hold
+resources you need elsewhere. Ordered top-N over a large model belongs on
+`async` too. For predicates, pagination, and worked
 examples, see [searching entities](/build/searching-entities/).
 
 ## Temporal queries
@@ -199,8 +202,9 @@ GET /api/entity/{entityId}/changes
 ```
 
 Each entry carries `changeType` (`CREATE`, `UPDATE`, or `DELETE`),
-`timeOfChange`, `transactionId`, and a `user` — the principal the change is
-**attributed** to, always present.
+`timeOfChange`, and a `user` — the principal the change is **attributed** to,
+always present. `transactionId` and `fieldsChangedCount` appear when the
+underlying entity version is available.
 
 As of cyoda-go v0.8.3 an entry also carries who actually performed it:
 

@@ -19,7 +19,7 @@ src/schemas/
 src/data/cyoda-help-index.json
 
 # Auto-generated at build time by scripts/generate-config-data.js
-# (source of truth is the tracked src/data/cyoda-config-all.source.json)
+# (built from `cyoda help config all --format=json` against the pinned binary)
 src/data/cyoda-config-all.json
 
 # Auto-generated at build time by scripts/fetch-cyoda-openapi.js
