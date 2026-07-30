@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "scripts": {
     "dev": "astro dev",
-    "predev": "node scripts/fetch-cyoda-help-index.js --if-missing && node scripts/generate-help-pages.js && node scripts/fetch-cyoda-openapi.js --if-missing && node scripts/fetch-cyoda-schemas.js --if-missing && node scripts/generate-config-data.js",
+    "predev": "node scripts/fetch-cyoda-help-index.js --if-missing && node scripts/generate-help-pages.js && node scripts/fetch-cyoda-openapi.js --if-missing && node scripts/fetch-cyoda-schemas.js --if-missing && node scripts/generate-config-data.js --if-missing",
     "start": "astro dev",
     "build": "pnpm run fetch:help-index && pnpm run generate:help-pages && pnpm run fetch:openapi && pnpm run fetch:schemas && pnpm run generate:config-data && pnpm run generate:schema-pages && astro build && pnpm run export:markdown && pnpm run generate:llms && pnpm run generate:llms-full && pnpm run generate:md-sitemap && pnpm run package:schemas",
     "build:only": "astro build",
