@@ -12,7 +12,10 @@ test.describe('static help mirror', () => {
   test('topic tree page links into rendered mirror', async ({ page }) => {
     await page.goto('/help/topic-tree/');
     // At least one topic invocation appears as a link to /help/<top>/.
-    const link = page.locator('a[href^="/help/"]').first();
+    // Scope to <main>: the sidebar also carries /help/ links, and it is
+    // collapsed (and so not visible) on mobile viewports — an unscoped
+    // .first() resolves to one of those and fails on Mobile Chrome/Safari.
+    const link = page.locator('main a[href^="/help/"]').first();
     await expect(link).toBeVisible();
   });
 
