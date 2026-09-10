@@ -31,14 +31,14 @@
     "perf:check": "pnpm run build && pnpm dlx lighthouse@13 http://localhost:3000 --budget-path=performance-budget.json --output=json --output-path=lighthouse-report.json"
   },
   "dependencies": {
-    "@astrojs/react": "^5.0.3",
-    "@astrojs/starlight": "^0.38.4",
+    "@astrojs/react": "^6.0.5",
+    "@astrojs/starlight": "^0.42.0",
     "@jop-software/astro-cookieconsent": "^3.0.1",
     "@playwright/test": "^1.55.0",
     "@primer/primitives": "^11.1.0",
     "@stoplight/elements": "^9.0.6",
     "archiver": "^8.0.0",
-    "astro": "^6.1.4",
+    "astro": "^7.2.10",
     "dotenv": "^17.2.2",
     "glob": "^13.0.6",
     "playwright": "^1.55.0",
@@ -53,12 +53,11 @@
     "serve": "^14.2.4"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "pnpm": {
     "overrides": {
-      "lodash": "^4.17.21",
-      "@astrojs/sitemap": "~3.6.0"
+      "lodash": "^4.17.21"
     },
     "onlyBuiltDependencies": [
       "esbuild",
