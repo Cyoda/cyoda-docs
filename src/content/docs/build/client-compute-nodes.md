@@ -322,8 +322,8 @@ server-to-client write blocked for `CYODA_KEEPALIVE_TIMEOUT`. The second
 condition evicts a node that continues to send keep-alives while its
 application is blocked.
 
-Each member's stream has one writer that drains an outbox. A slow consumer
-therefore applies back pressure to its own stream only.
+A slow consumer applies back pressure to its own stream only, not to the
+streams of other members.
 
 ---
 
@@ -794,11 +794,8 @@ The practical consequences:
   The server rejects `transactionTimeoutMillis`, `transactionSize` and search's
   `timeoutMillis` with `400` on a joined callback. The callback does not own
   the transaction.
-- **The model governs the data you return.** The engine validates a processor's
-  returned data in the same way as a client write. To write a field that the
-  model does not declare, set that model's `changeLevel`. If the level does not
-  permit the change, the transition fails with `WORKFLOW_FAILED` and rolls
-  back.
+- **The model governs the data you return.** See
+  [the model governs the data a processor returns](/build/workflows-and-processors/#processors).
 
 Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#all-variables)):
 

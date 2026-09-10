@@ -92,8 +92,7 @@ The engine applies these rules in order:
    `reason=no_criterion_matched`.
 
 To make a workflow a catch-all, place it **last** in the import array and give
-it no criterion. An active workflow declared after it is unreachable, in the
-same way as an automated transition declared after an unguarded one.
+it no criterion. An active workflow declared after it is unreachable.
 
 The engine audits selection under the transaction that drives the call. It
 records a `WORKFLOW_SKIP` event for each skipped workflow, with the rejection
@@ -116,11 +115,10 @@ field, or on lifecycle metadata.
 entity whose payload changes can bind to a different definition. If the new
 definition does not declare the entity's current state, the engine does **not**
 fall through to a definition that declares it. A named transition fails with
-`400 WORKFLOW_FAILED`, and a loopback ends as a no-op.
-
-A new binding can also discard a pending scheduled transition. The engine
-deletes the task when the task next becomes due, and records
-`SCHEDULED_TRANSITION_CANCEL` at that time, not at the write.
+`400 WORKFLOW_FAILED`, and a loopback ends as a no-op. A new binding can also
+discard a pending scheduled transition: the engine deletes the task when it next
+becomes due, and records `SCHEDULED_TRANSITION_CANCEL` at that time, not at the
+write.
 
 </Aside>
 
@@ -512,14 +510,11 @@ Group criteria combine multiple conditions using logical operators.
 import with `400 VALIDATION_FAILED`. To negate a group, nest the group inside
 the `NOT`.
 
-`NOT` inverts the answer of its child. The engine does not replace it with the
-negative form of the leaf operator, and the two forms select different
-entities. `NOT($.tags[*] EQUALS "red")` fires when **no** element equals
-`"red"`. `$.tags[*] NOT_EQUAL "red"` fires when **some** element is different.
-
-`NOT` also fires over an empty list, an explicit `null` and an absent field,
-because the wrapped leaf is false in all three states. See
-[negation](/build/searching-entities/#negation-with-not) for the full contract.
+`NOT` inverts its child's answer. It is not the negative form of the leaf
+operator, and the two select different entities. Over a wildcard path, and over
+an empty list, an explicit `null` or an absent field, the result is
+non-obvious. See
+[negation](/build/searching-entities/#negation-with-not) for the contract.
 
 ### Function Criteria
 
@@ -644,8 +639,8 @@ that it guards:
   with `400 WORKFLOW_FAILED`, and the engine rolls the save back.
 - A criterion that carries an operator that no evaluator supports fails the
   save.
-- A model-store failure during evaluation fails the save. A structural error on
-  another condition in the same group does not hide it.
+- A model-store failure during evaluation fails the save, even when another
+  condition in the same group also fails structurally.
 
 ## Processors
 

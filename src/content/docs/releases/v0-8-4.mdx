@@ -323,8 +323,8 @@ memory must lower this.
 The server no longer imposes a scan budget on search: sqlite's residual-scan
 budget, `CYODA_SQLITE_SEARCH_SCAN_LIMIT` and the `SCAN_BUDGET_EXHAUSTED` code
 are removed, closing the divergence with memory and postgres. Bounding search
-*time* is the caller's job and it has the levers; bounding search *memory*
-remains the server's, and every search path streams.
+*time* is the caller's job, using `timeoutMillis` or cancellation. Bounding
+search *memory* is the server's, and every search path now streams.
 
 Two throughput fixes ride along: a model's parsed schema is cached alongside its
 descriptor (on a 1000-field model, criterion evaluation drops from 1.84 ms and
@@ -409,11 +409,12 @@ removed from `EntityDeleteAllRequest`.
 the wrong workflow's definition.** A named transition, a loopback re-evaluation
 and a scheduled transition firing all resolved the workflow by "the first active
 definition that declares the entity's current state", ignoring the entity's
-selection criterion. Where definitions share state names — the normal shape for
-a per-kind machine — that is always the *first* declared workflow, for every
-entity: the wrong guards, processors and target states, silently and fail-open.
-Selection at creation was correct, which is why the binding looked right in the
-creation audit. All four doors now resolve through the documented criterion
+selection criterion. Definitions on one model usually share state names, which
+is the normal shape for a per-kind machine. In that case the resolver always
+picked the first declared workflow, for every entity, applying the wrong guards,
+processors and target states. It did so silently, and it failed open. Selection
+at creation was correct, which is why the binding looked right in the creation
+audit. All four doors now resolve through the documented criterion
 rules on every call.
 
 **Integrators:** because selection is re-evaluated per call, an entity whose

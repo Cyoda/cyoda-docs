@@ -152,8 +152,6 @@ A field seen as both a scalar and an array names both forms in one node:
 { ".poly": "STRING", ".poly[*]": "STRING" }
 ```
 
-The model enforces both branches, so the export names both.
-
 ### Type descriptors
 
 A type descriptor is a JSON string: either one `DataType` name, or a
@@ -422,10 +420,9 @@ primitives:
 | `BYTE_ARRAY` | `{"type": "string", "format": "byte"}` |
 
 **A field that declares more than one branch renders as `anyOf`**, never
-`oneOf`. `oneOf` accepts a value only when exactly one branch matches it. Two
-`DataType` values can render the same shape, because `INTEGER` and `LONG` both
-give `{"type": "integer"}`. `anyOf` therefore accepts every value that the
-model admits.
+`oneOf`. Two `DataType` values can render the same shape, because `INTEGER` and
+`LONG` both give `{"type": "integer"}`, so a union may carry identical
+branches.
 
 ```json
 // posted: {"data":"hello"} then {"data":42}
@@ -487,30 +484,23 @@ renders as an `anyOf` over the array branch and the scalar branch:
 
 ## Key behaviours for consumers
 
-1. **The root node `$` is always present** in a `SIMPLE_VIEW` export. It
-   describes the top-level object of the entity.
-
-2. **Output is deterministic.** Node paths are sorted lexicographically, and
+1. **Output is deterministic.** Node paths are sorted lexicographically, and
    keys within a node are sorted, so two exports of the same model are
    byte-identical.
 
-3. **Models evolve by merging.** When you ingest entities under a model whose
+2. **Models evolve by merging.** When you ingest entities under a model whose
    change level permits it, new fields appear, the declared types of a leaf
    widen (`INTEGER` → `[INTEGER, STRING]`), and a field can declare a new kind.
    The export does not report the length of an array.
 
-4. **Every declared branch is exported.** A field that declares more than one
+3. **Every declared branch is exported.** A field that declares more than one
    kind names each kind. The export describes what the model enforces.
 
-5. **An export is not an import format.** `SAMPLE_DATA` is the only converter
+4. **An export is not an import format.** `SAMPLE_DATA` is the only converter
    that the import endpoint accepts. A `POST` of an export to
    `/model/import/JSON/SIMPLE_VIEW/…` returns
    `400 BAD_REQUEST: unsupported import converter`. To establish a model, post
    representative sample documents.
-
-6. **Structural keys show the nesting.** `#.fieldName: "OBJECT"` means that the
-   field has a node of its own in the map. `#: "ARRAY_ELEMENT"` means that this
-   node describes the elements of its parent array.
 
 ## Where to go next
 

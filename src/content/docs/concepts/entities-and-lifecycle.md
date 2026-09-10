@@ -54,7 +54,7 @@ and objects. That observed shape is the schema.
 
 A model has two structural modes. While **unlocked**, it evolves by merging
 — new fields appear, types widen, a field comes to declare more than one
-shape. An array's length is never part of that schema. When **locked**, the
+kind. When **locked**, the
 structural contract is frozen and any incoming entity that does not match
 is rejected. Lock is the right default for production systems with external
 producers, where silently accepting a widened shape would be a compliance

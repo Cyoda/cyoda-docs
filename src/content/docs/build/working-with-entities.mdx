@@ -137,24 +137,22 @@ The parameter covers the first chunk only. If the time elapses after that, the
 server reports a `TRANSACTION_TIMEOUT` element in the per-chunk response
 instead of an HTTP `408`.
 
-The server rejects the parameter with `400` on a request that joins an open
-transaction. A routed compute-node callback cannot set a deadline on a
-transaction that it does not own. The same rule applies to `transactionSize` on
-a delete and to `timeoutMillis` on a search.
+The server rejects the parameter with `400` on a request that
+[joins an open transaction](/build/client-compute-nodes/#1031-transaction-joined-callbacks).
+The same rule applies to `transactionSize` on a delete and to `timeoutMillis`
+on a search.
+
+`503 STORAGE_UNAVAILABLE` reports a problem in the storage layer, and it is
+**retryable**. It covers three conditions: the connection pool could not supply
+a connection, the database aborted the transaction at its idle ceiling, and the
+connection to the database went away.
 
 ## When a write is visible
 
 A `2xx` response to a write means that the write is **visible to every later
-read on every node**. A caller can write and then read its own data back. No
-node lags another for a committed write.
-
-The seven entity write operations do not use a `waitForConsistencyAfter`
-parameter. The server accepts a request that carries it and ignores the value.
-
-`503 STORAGE_UNAVAILABLE` reports a problem in the storage layer. It is
-**retryable**. It covers three conditions: the connection pool could not supply
-a connection, the database aborted the transaction at its idle ceiling, and the
-connection to the database went away.
+read on every node**. A caller can write and then read its own data back. Every
+storage engine delivers this contract — see
+[storage engines](/run/storage-engines/#one-application-contract).
 
 ## What the platform will not store
 
@@ -214,9 +212,11 @@ DELETE /api/entity/orders/1?transactionSize=500
 ```
 
 A batch that is already committed stays durable if a later batch fails. The
-server reports two conditions per id in `deleteResult.idToError`, and does not
-retry them: a version mismatch, which means the entity changed after the server
-selected it, and a commit failure for the batch.
+server records two conditions per id in `deleteResult.idToError`, and does not
+retry either:
+
+- A version mismatch. The entity changed after the server selected it.
+- A commit failure for the batch.
 
 Without `pointInTime`, the server selects the matching entities again before
 each batch. If entities are created at least as fast as the server removes

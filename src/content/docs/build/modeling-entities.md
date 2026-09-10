@@ -31,11 +31,11 @@ choice depends on how exposed the model is to outside producers.
 a representative sample, and Cyoda records the fields, their types, and the
 shape of nested arrays and objects.
 
-The body is one JSON object, which is one sample document. It can also be a
-JSON array of objects, which is several sample documents. Cyoda merges the
-array elements in the same way as successive imports. Any other body, such as a
-scalar or an array that holds a non-object, is `400 VALIDATION_FAILED`. The
-message names the element that caused the failure.
+Post one JSON object as a single sample document, or a JSON array of objects
+as several. Cyoda merges the array elements exactly as it merges successive
+imports. Any other body, such as a scalar or an array that holds a non-object,
+is `400 VALIDATION_FAILED`. The message names the element that caused the
+failure.
 
 New samples **widen** the schema. A field seen first as `INTEGER` and later as
 `STRING` declares both types. Use discover mode when you prototype, when you
@@ -80,21 +80,21 @@ A field declares more than one kind when Cyoda observes it in each kind. This
 happens while the model is `UNLOCKED`, or through a `STRUCTURAL` change on a
 locked model.
 
-A field admits a **value** when two conditions are true. The kind of the value
-matches a kind that the field declares. The admission test of the declared type
-accepts the value. Cyoda applies this test to each value:
+A field admits a **value** when both of these hold: the value's kind is one the
+field declares, and the declared type's admission test accepts the value. Cyoda
+applies the test per value. For example:
 
 - A field declared `DOUBLE` accepts `1000`, `1000.0`, `1e3` and `2147483648`
   with no schema change. The precision and scale of each value fit `DOUBLE`.
-- The same field needs a `TYPE` change for `9007199254740993`. That value needs
+- The same field needs a [`TYPE` change](#the-change-level-ladder) for
+  `9007199254740993`. That value needs
   sixteen significant digits, which is more than `DOUBLE` holds exactly. At
   `TYPE`, the field widens to `UNBOUND_DECIMAL`, the narrowest type that holds
   both values.
 - A field declared `STRING` holds `"2026-03-01"` with no schema change, because
   `STRING` admits every string. A field acquires a temporal type such as
   `LOCAL_DATE` at **registration**, from sample data that shows a date-shaped
-  value. A write to a field already declared `STRING` does not add a temporal
-  type.
+  value.
 
 `null` follows the declaration like any other value. A scalar field always
 accepts `null`. A container field accepts `null` where the model observed it.
@@ -114,10 +114,10 @@ there is no escape form. A name outside the charset is therefore not
 searchable. For example, `$.a.b` addresses a nested `a` → `b`, not a field
 called `a.b`.
 
-The rule applies to the two paths that establish the field set of a model:
-sample-data import, and the change-level extension that an entity write
-performs. It does not apply to strict validation, which is a model with no
-change level, and `PATCH`. Strict validation establishes no fields.
+The rule applies to the two paths that establish a model's field set:
+sample-data import, and the change-level extension an entity write performs. It
+does not apply to `PATCH`, or to strict validation, which is a model with no
+change level. Neither of those establishes a field.
 
 Cyoda does not migrate a model that already carries a non-conforming field, and
 there is no compatibility mode. Rename the key in the source data and establish
@@ -179,9 +179,6 @@ The four levels are hierarchical, most restrictive first:
 | `TYPE` | An existing field's declared types may widen. |
 | `STRUCTURAL` | New fields, and giving a path a kind it does not yet declare. |
 
-`ARRAY_LENGTH` permits no schema change. An array of any length is admissible
-at this level, as it is at every other level.
-
 Two rules decide which level a write needs:
 
 - A write that gives a path a **kind** it does not declare is a `STRUCTURAL`
@@ -195,9 +192,8 @@ learns its first kind at `TYPE`. For the element of an array, it learns its
 first kind at `ARRAY_ELEMENTS`.
 
 The change level governs data returned by a **workflow processor** in the same
-way as data sent by a client. A processor that writes a field that the model
-does not declare needs the change level set. If the level does not permit the
-change, the transition fails with `WORKFLOW_FAILED` and rolls back.
+way as data sent by a client. See
+[the model governs the data a processor returns](/build/workflows-and-processors/#processors).
 
 Things to plan explicitly:
 
@@ -211,9 +207,8 @@ Things to plan explicitly:
   field, you cannot narrow it to `INTEGER` within the same version.
   To narrow, introduce a new `modelVersion` with the stricter type
   and migrate the data.
-- **Field names outside the addressable charset.** Cyoda rejects such a key on
-  the way in, and the key never establishes a field. Plan the rename in the
-  source data. Cyoda provides no migration.
+- **Field names outside the addressable charset.** See
+  [field names must be addressable](#field-names-must-be-addressable).
 
 ## Who validates what
 

@@ -68,8 +68,8 @@ therefore stops routing to the node, and it does not restart it.
 Three receive-side HTTP timeouts apply to the API server and to the admin
 server: `CYODA_HTTP_READ_HEADER_TIMEOUT` (`10s`), `CYODA_HTTP_READ_TIMEOUT`
 (`5m`) and `CYODA_HTTP_IDLE_TIMEOUT` (`2m`). `CYODA_HTTP_WRITE_TIMEOUT` ships
-disabled, so the server sets no time limit on the work that a request asks
-for.
+disabled, so the server sets no limit on how long a request may take to produce
+its response.
 
 ## Data directory
 

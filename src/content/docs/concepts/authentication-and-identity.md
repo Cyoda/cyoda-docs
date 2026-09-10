@@ -105,14 +105,9 @@ guessed, so one tenant can never borrow another's trust.
 
 Provider metadata — the JWKS used to verify signatures — is fetched from each
 issuer's OIDC discovery document, refreshed across the cluster, and guarded
-against server-side request forgery.
-
-The key caches converge across the cluster. A provider reload keeps the key
-sources it already holds, and it warms every loaded provider, on the node that
-serves the call and on each peer it broadcasts to. If the identity provider is
-unreachable, the node retries the warm-up every 30 seconds. Trusted-key
-revocation propagates to every node, and the OIDC provider list converges again
-after a lost gossip broadcast.
+against server-side request forgery. A reload preserves existing key sources and
+re-warms every provider on every node; a warm-up that fails because the identity
+provider is unreachable retries every 30 seconds.
 
 ## Where this is configured
 

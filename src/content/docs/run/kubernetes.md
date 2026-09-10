@@ -72,16 +72,22 @@ reconcile, which would cause inter-node auth to drift.
   readiness probe to the one the chart exposes.
 - **Readiness and liveness probes.** Both are wired by default; tune if
   your control plane has stricter latency budgets.
-- **A node that panics withdraws itself and stays down.** A recovered panic in
-  engine or store work marks the node permanently unhealthy. `/health` reports
-  `503 DOWN` and `/readyz` reports `503`, so Kubernetes removes the pod from
-  its Service in approximately 10 to 15 seconds. `/livez` continues to pass, so
-  Kubernetes does not restart the pod. Three limits apply: peer-forwarded work
-  continues to arrive, established connections stay open, and nothing restarts
-  the node. Read the ticket id from the log, then replace the pod.
+- **A node that panics withdraws itself and stays down.** See
+  [a panicked node withdraws itself](#a-panicked-node-withdraws-itself).
 - **Pod Disruption Budgets.** Set a minimum available count that matches
   your replica count minus one so rolling upgrades and node drains do not
   take the service below quorum.
+
+### A panicked node withdraws itself
+
+A recovered panic in engine or store work marks the node permanently unhealthy.
+`/health` reports `503 DOWN` and `/readyz` reports `503`, so Kubernetes removes
+the pod from its Service in approximately 10 to 15 seconds. `/livez` still
+passes, so Kubernetes does not restart the pod.
+
+Two things keep running in the meantime. Peer-forwarded work still arrives, and
+established connections stay open. Read the ticket id from the log, then
+replace the pod.
 
 ## Backup and restore
 
