@@ -59,6 +59,9 @@ playwright-report/
 # of whether the --output-dir flag is set on a given host/worktree.
 .playwright-mcp/
 
+# Serena MCP project cache + local settings, created automatically on first use.
+.serena/
+
 # agent-safehouse local settings
 .sandbox/
 
