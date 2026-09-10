@@ -784,12 +784,15 @@ The practical consequences:
 - Callbacks see the cascade's **uncommitted** writes, and their acks stay provisional until `T` commits.
 - `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
 - If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
-- **As of v0.8.3 this covers the search RPCs too.** A callback presenting a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` previously had it silently ignored — the interceptor was wired only for the write RPCs. A processor's writes therefore joined the originating transaction while its *searches* ran unjoined against last-committed state, returning stale results with no error to signal it. If you worked around this by re-reading entities after writing them, that workaround is no longer needed.
-- **Do not pass `pointInTime` on a read inside a joined transaction.** A
-  point-in-time read is committed-only on every backend, so it does not return
-  your own uncommitted writes. A callback that reads its own uncommitted write
-  this way gets `404 ENTITY_NOT_FOUND`. Omit the parameter. A **current-state**
-  read inside a transaction is read-your-own-writes correct.
+- **The token covers the search RPCs as well as the write RPCs.** A callback that presents a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` joins `T`, so a processor's searches see the writes the same processor has already made in that transaction.
+- **`pointInTime` selects committed state, even inside a joined transaction.**
+  A point-in-time read is committed-only on every backend, so it does not see
+  the writes `T` has not yet committed. Pass it when you want the committed
+  state as at an instant, which is the usual reason to read history from a
+  processor. Omit it when you want to read back what this transaction has
+  written: a current-state read inside `T` is read-your-own-writes correct. An
+  entity that this transaction created, read back with `pointInTime`, answers
+  `404 ENTITY_NOT_FOUND`.
 - **A request that joins an open transaction cannot carry its own deadline.**
   The server rejects `transactionTimeoutMillis`, `transactionSize` and search's
   `timeoutMillis` with `400` on a joined callback. The callback does not own
