@@ -42,7 +42,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Workflow Name",
   "desc": "Workflow description",
   "initialState": "StateName",
@@ -55,7 +55,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 #### Attributes
 
 - `version`: Workflow schema `MAJOR.MINOR` version. The current version is
-  `"1.3"` (cyoda-go v0.8.3); the server accepts `"1.1"` through `"1.3"` and
+  `"1.4"` (cyoda-go v0.8.4); the server accepts `"1.1"` through `"1.4"` and
   stamps the current version on export. Malformed values such as `"1"` or
   `"1.0"` are rejected at import. Run `cyoda help workflows schema-version` for the
   authoritative supported range.
@@ -63,12 +63,67 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 - `desc`: Detailed description of the workflow
 - `initialState`: Starting point for new entities
 - `active`: Indicates whether the workflow is active
-- `criterion`: Optional criterion for selecting which workflow applies to a given entity. Uses the same condition types as transition criteria (simple, group, function). When multiple workflows are defined for a model, the platform evaluates each workflow's criterion against the entity to determine which workflow governs it.
+- `criterion`: Optional criterion for selecting which workflow applies to a given entity. Uses the same condition types as transition criteria (simple, lifecycle, group, function). When multiple workflows are defined for a model, the platform evaluates each workflow's criterion against the entity to determine which workflow governs it.
 - `states`: Map of state names to state definitions
 
 ### Multiple Workflows per Model
 
-An entity model can have multiple workflows, each with its own `criterion` at the workflow level. When an entity is created, the platform evaluates each active workflow's criterion to select the applicable workflow. The platform evaluates active workflows in the order they are defined and uses the first whose criterion matches (or the first with no criterion, which matches unconditionally). This allows different processing paths for different categories of entities within the same model.
+An entity model can have multiple workflows, each with its own `criterion` at
+the workflow level. This allows different processing paths for different
+categories of entities within the same model.
+
+Selection runs **per call, on every door onto the engine** — entity creation, a
+named transition, a loopback re-evaluation, a scheduled transition firing, and
+`GET /entity/{entityId}/transitions` — with no caching in between:
+
+1. Iterate workflows in stored declaration order. Storage preserves the order
+   from the most recent import, and `MERGE` appends new workflows at the tail.
+2. Skip any workflow whose `active` flag is `false`. Inactive workflows are
+   invisible to selection regardless of their criterion.
+3. Evaluate each active workflow's `criterion` against the entity payload and
+   lifecycle metadata. A `null` or absent criterion matches unconditionally.
+4. The first active workflow whose criterion matches wins; later workflows are
+   not consulted.
+5. If no active workflow matches, the engine falls back to the embedded default
+   workflow, and says so — a warning on the response body and an
+   operator-visible log line carrying `reason=no_criterion_matched`.
+
+Place an unconditional workflow **last** in the import array if you want it as
+a catch-all; active workflows declared after it are unreachable, for the same
+reason an unguarded automated transition shadows its successors.
+
+Selection is audited. Each skipped workflow records a `WORKFLOW_SKIP` event
+carrying the criterion's rejection reason, and the chosen one a
+`WORKFLOW_FOUND` event, under the transaction driving the call.
+`GET /entity/{entityId}/transitions` is a pure read and records nothing.
+
+<Aside type="caution" title="Choose the selection field deliberately">
+
+Until cyoda-go v0.8.4 only creation selected by criterion. Every later
+operation resolved the workflow by "the first active definition that declares
+the entity's current state" — which, where definitions share state names (the
+normal shape for a per-kind machine), is always the *first* declared workflow,
+for every entity. Entities ran the wrong guards, processors and target states,
+silently and fail-open, while the creation audit showed the right binding.
+
+Now that selection is re-evaluated per call, two design rules follow:
+
+- **Select on fields a caller cannot rewrite in the same request.** The
+  criterion is evaluated against the payload of the request being served, so a
+  criterion over a client-writable field lets one request choose which
+  definition's guards apply to itself. Where definitions differ in what they
+  permit, the selection field is a security control — prefer an immutable field
+  or lifecycle metadata.
+- **Select on something that stays true for the entity's whole lifetime.** An
+  entity whose payload changes can re-bind to a different definition. If its
+  current state is not declared there, the engine does **not** fall through to
+  a definition that does declare it: a named transition fails
+  `400 WORKFLOW_FAILED` and a loopback settles as a no-op. A re-bind can also
+  retire a pending scheduled transition that was acting as a time-based
+  control — the task is discarded when it next comes due, recorded as
+  `SCHEDULED_TRANSITION_CANCEL` at its scheduled time rather than at the write.
+
+</Aside>
 
 ### Annotations
 
@@ -81,7 +136,7 @@ or routing tags consumed by your own tooling.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "initialState": "INVALID",
   "active": true,
@@ -134,7 +189,7 @@ rejects the whole request rather than silently absorbing mistakes. A
 payload is rejected when it:
 
 - declares a schema `version` outside the supported range (currently
-  `"1.1"`–`"1.3"`) or malformed such as `"1"`/`"1.0"` (rejected with
+  `"1.1"`–`"1.4"`) or malformed such as `"1"`/`"1.0"` (rejected with
   `WORKFLOW_SCHEMA_VERSION_UNSUPPORTED`);
 - carries unknown or misspelled fields (e.g. `transtions`);
 - references a dangling state or reuses a name;
@@ -448,8 +503,21 @@ Group criteria combine multiple conditions using logical operators.
 
 #### Group Criteria Attributes
 
-- `operator`: Logical operator combining conditions (`AND`, `OR`, `NOT`)
+- `operator`: Logical operator combining conditions — exactly `AND`, `OR` or `NOT`, case-sensitive
 - `conditions`: Array of criteria (can be `simple`, `function`, `group`, `lifecycle`, or `array` types — supports arbitrary nesting)
+
+`AND` and `OR` take any number of entries, including zero: an empty `AND` is
+`true` and an empty `OR` is `false`. **`NOT` takes exactly one entry** — zero,
+or two or more, is rejected at import with `400 VALIDATION_FAILED`. Write
+`NOT(A AND B)` by nesting rather than as a two-entry list.
+
+`NOT` inverts its child's answer rather than being rewritten into the child's
+negative twin, and that distinction changes which entities pass a guard.
+`NOT($.tags[*] EQUALS "red")` fires when **no** element equals `"red"`, while
+`$.tags[*] NOT_EQUAL "red"` fires when **some** element differs. `NOT` over an
+empty list, an explicit `null` or an absent field fires, because the wrapped
+leaf is false in all three cases. See
+[negation](/build/searching-entities/#negation-with-not) for the full contract.
 
 ### Function Criteria
 
@@ -519,22 +587,26 @@ that parses into no temporal form at all.
 
 ### Array Criteria
 
-Array criteria evaluate a condition against an array of values.
+Array criteria match values by **position** inside a JSON array.
 
 ```json
 "criterion": {
   "type": "array",
-  "jsonPath": "$.category",
-  "operation": "EQUALS",
-  "value": ["electronics", "software", "services"]
+  "jsonPath": "$.laureates[*]",
+  "values": ["John", null, "Hopfield"]
 }
 ```
 
 #### Array Criteria Attributes
 
-- `jsonPath`: JSONPath expression to the field
-- `operation`: Comparison operator
-- `value`: Array of string values to match against
+- `jsonPath`: JSONPath to the array's **elements**. It must carry a trailing
+  `[*]` — a bare path addresses the array itself, not its elements, and is
+  rejected with `400 INVALID_FIELD_PATH`.
+- `values`: Positional values, one per array index in order. Each non-null
+  entry is a test of the element at that index, and the clause is read as an
+  `AND` of those tests: the example fires when element 0 is `"John"` **and**
+  element 2 is `"Hopfield"`. A `null` entry tests nothing at that index, so a
+  `values` array of all `null` matches every entity.
 
 ### Operator Types
 
@@ -552,6 +624,30 @@ evaluation model — type-directed comparison, null handling, the `LIKE` grammar
 — see [predicate semantics](/build/searching-entities/#predicate-semantics);
 criteria and search share one kernel, so the rules are identical.
 
+### A criterion is validated at import, and fails the save at evaluation
+
+Criteria and search conditions are held to the same
+[path grammar](/build/searching-entities/#how-a-field-path-is-written) and the
+same operator catalogue, enforced in two places.
+
+**At import**, a criterion's `jsonPath`, operator names and `LIKE` /
+`MATCHES_PATTERN` operands are checked, and a failure rejects the whole import
+with `400 VALIDATION_FAILED`. Until cyoda-go v0.8.4 a criterion on a bare path
+such as `amount` imported cleanly and then guarded a transition that silently
+never fired. Workflows already stored keep evaluating and will fail on their
+next re-import — regenerate import payloads before upgrading.
+
+**At evaluation**, a criterion that cannot be answered now fails the write it
+is guarding rather than being treated as "not satisfied":
+
+- A criterion naming a field the model does not declare aborts the save with
+  `400 WORKFLOW_FAILED` and rolls it back. A misspelled field name used to mean
+  a transition that silently never fired.
+- A criterion carrying an operator nobody can evaluate fails the save rather
+  than short-circuiting past it.
+- A model-store outage during criterion evaluation is reported rather than
+  masked by a structural error on a sibling conjunct.
+
 ## Processors
 
 Processors implement custom logic to run during transitions. All processors are
@@ -560,6 +656,21 @@ Processors implement custom logic to run during transitions. All processors are
 To fire a transition on a delay rather than on an API call or a cascade, you do
 not attach a processor: you put a [`schedule`](#scheduled-transitions) on the
 transition itself.
+
+<Aside type="caution" title="A processor's returned data is governed by the model">
+
+Data a processor returns is validated exactly as a client's write is: it must
+be storable, and it must satisfy the model's schema. A processor introducing a
+field the model does not declare needs that model's
+[`changeLevel`](/build/modeling-entities/#the-change-level-ladder) to permit it;
+otherwise the transition fails with `WORKFLOW_FAILED` and rolls back, leaving
+neither the entity nor any schema change behind.
+
+Until cyoda-go v0.8.4 a processor could write content no backend could store,
+or fields outside the model — producing an entity the API would hand back and
+then refuse to accept on a subsequent `PUT`.
+
+</Aside>
 
 ### Externalized Processors
 
@@ -631,7 +742,7 @@ The following section walks through the configuration step by step.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -645,7 +756,7 @@ Start by defining the overall structure of states and transitions.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -730,7 +841,7 @@ We add criteria to the `VALIDATE` and `MATCH` transitions:
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -833,7 +944,7 @@ We add two processors to the `APPROVE` transition in the `SUBMITTED` state, resp
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",

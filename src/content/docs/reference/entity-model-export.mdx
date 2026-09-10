@@ -1,462 +1,341 @@
 ---
-title: "Entity model export (SIMPLE_VIEW)"
-description: "API specification for the SIMPLE_VIEW entity-model export — response format, node descriptors, type descriptors, and error shapes."
+title: "Entity model export"
+description: "Wire format of the SIMPLE_VIEW and JSON_SCHEMA entity-model exports — response envelope, node descriptors, type descriptors, and error shapes."
 sidebar:
   order: 22
 ---
 
 import VendoredBanner from '../../../components/VendoredBanner.astro';
+import { Aside } from '@astrojs/starlight/components';
 
 <VendoredBanner stability="evolving" />
 
-The SIMPLE_VIEW export returns the full structural model of an entity
-type — every node, every field, every observed type — in a compact,
-round-trippable JSON form. This page is the wire-format specification:
-endpoint, response envelope, node and type descriptors, JSON Schema, and
-error shapes. For the conceptual context (what a model is, how
-discovery/widening/locking work), see
+A model export returns the full structural model of an entity type — every
+node, every field, every declared type — in a compact JSON form. Two converters
+render it: **`SIMPLE_VIEW`**, Cyoda's native path-keyed form, and
+**`JSON_SCHEMA`**, a JSON Schema document. This page is the wire-format
+specification for both. For the conceptual context — what a model is, how
+discovery, widening and locking work — see
 [Modeling entities](/build/modeling-entities/) and
 [Entities and lifecycle](/concepts/entities-and-lifecycle/).
+
+<Aside type="caution" title="The wire format changed in cyoda-go v0.8.4">
+
+Three things a pre-v0.8.4 consumer relied on are gone. Array descriptors of the
+form `(TYPE x N)` and their heterogeneous counterpart, a JSON array of
+per-position types, no longer exist — an array's length was never part of the
+model and is no longer reported as if it were. Detached array nodes and the
+two-element "mixed node" are gone with them: every node descriptor is now an
+object descriptor. And `JSON_SCHEMA` renders a multi-branch field as `anyOf`
+rather than `oneOf`, because two branches can render the same JSON Schema shape
+and `oneOf` would then reject a value the model admits.
+
+</Aside>
 
 ## Endpoint
 
 ```
-GET /model/export/SIMPLE_VIEW/{entityName}/{modelVersion}
+GET /model/export/{converter}/{entityName}/{modelVersion}
 ```
 
-| Parameter      | Type    | Description                          |
-|----------------|---------|--------------------------------------|
-| `entityName`   | String  | Name of the entity model             |
-| `modelVersion` | Integer | Version number of the entity model   |
+| Parameter      | Type    | Description                                        |
+|----------------|---------|----------------------------------------------------|
+| `converter`    | String  | `SIMPLE_VIEW` or `JSON_SCHEMA`                     |
+| `entityName`   | String  | Name of the entity model                           |
+| `modelVersion` | Integer | Version number of the entity model                 |
 
 **Response Content-Type:** `application/json`
 
 ## Response envelope
 
-Every SIMPLE_VIEW export response is a JSON object with exactly two
-top-level keys:
+Both converters return the same envelope. `currentState` and `model` are always
+present; `uniqueKeys` appears only when the model declares composite unique
+keys.
 
-| Key            | Type   | Description                                                  |
-|----------------|--------|--------------------------------------------------------------|
-| `currentState` | String | Lifecycle state of the model: `"UNLOCKED"` or `"LOCKED"`    |
-| `model`        | Object | The SIMPLE_VIEW body — a map of **node paths** to **node descriptors** |
+| Key            | Type   | Description                                                    |
+|----------------|--------|----------------------------------------------------------------|
+| `currentState` | String | Lifecycle state of the model: `"UNLOCKED"` or `"LOCKED"`       |
+| `model`        | Object | The exported model, in the converter's own form                |
+| `uniqueKeys`   | Array  | Composite unique-key definitions; omitted when none are declared |
 
 ```json
 {
     "currentState": "LOCKED",
-    "model": { ... }
-}
-```
-
-## The `model` object — structure overview
-
-The `model` value is a flat JSON object whose **keys are node paths**
-and whose **values are node descriptors**. Each entry describes one
-level of the entity's hierarchical structure. The entire nested tree is
-flattened into this single-depth map.
-
-There are three kinds of node descriptors, corresponding to three
-structural cases:
-
-1. **Object nodes** — JSON objects mapping field keys to type
-   descriptors.
-2. **Array nodes** — a single JSON value (primitive or array)
-   representing a detached array specification.
-3. **Mixed nodes** — a JSON array of exactly two elements:
-   `[<object-node>, <array-node>]`.
-
-## Node paths
-
-Node paths use JSONPath-like syntax rooted at `$`.
-
-| Path                      | Meaning                                                   |
-|---------------------------|-----------------------------------------------------------|
-| `$`                       | The root object                                           |
-| `$.fieldName[*]`          | Array elements inside `fieldName` on the root object      |
-| `$.parent[*].child[*]`    | Array elements inside `child`, nested under `parent` array elements |
-| `$.a[*][*]`               | Elements of a nested (multi-dimensional) array            |
-
-The `[*]` marker (called `COLLECTION_MARKER` internally) denotes "all
-elements of this array." Node paths are always sorted lexicographically
-in the output.
-
-**Depth** is derived from the number of `[*]` segments in the path
-(i.e., `path.split("[*]").count() - 1`).
-
-## Node descriptor formats
-
-### 1. Object node (most common)
-
-A JSON object whose entries fall into two categories:
-
-#### a) Data fields — keys starting with `.` (dot)
-
-Each key is a dot-prefixed field name. The value is the field's **type
-descriptor** (see [Type descriptors](#type-descriptors) below).
-
-```json
-{
-    ".category": "STRING",
-    ".year": "INTEGER",
-    ".score": "DOUBLE"
-}
-```
-
-Array fields within an object node have keys ending in `[*]`:
-
-```json
-{
-    ".tags[*]": "(STRING x 3)",
-    ".name": "STRING"
-}
-```
-
-The `(TYPE x WIDTH)` form is an array descriptor, where `TYPE` is the
-element type and `WIDTH` is the array length; e.g., `(INT x 4)` is a
-four-element integer array. See [Array type descriptors](#array-type-descriptors)
-for the full syntax.
-
-#### b) Structural fields — keys starting with `#`
-
-Structural fields are metadata markers prefixed with `#`. They indicate
-the role of this node in the overall structure.
-
-| Key            | Value              | Meaning                                         |
-|----------------|--------------------|-------------------------------------------------|
-| `#`            | `"ARRAY_ELEMENT"`  | This node describes elements of its parent array |
-| `#.fieldName`  | `"OBJECT"`         | `fieldName` is an object (has its own child node)|
-
-Example — a node representing array elements with an object sub-field:
-
-```json
-{
-    ".firstname": "STRING",
-    ".id": "STRING",
-    "#": "ARRAY_ELEMENT",
-    "#.address": "OBJECT"
-}
-```
-
-Fields are sorted alphabetically within the object (data fields first,
-then structural fields, both sorted by key).
-
-### 2. Array node (detached array)
-
-Arrays of arrays (multidimensional arrays beyond the first dimension)
-create detached array nodes — each inner array becomes its own node in
-the export tree, keyed by the path to that inner array (e.g.
-`$.matrix[*]`). Likewise, arrays of objects create a separate node for
-the element shape (see Examples 1 and 3).
-
-When a node path points to a pure array (no object fields at this
-level), the value is the array's **type descriptor** directly — either a
-UniTypeArray string or a MultiTypeArray JSON array. See
-[Array type descriptors](#array-type-descriptors).
-
-```json
-{
-    "$.data[*]": "(INTEGER x 5)"
-}
-```
-
-### 3. Mixed node (structural polymorphism)
-
-When the same path has been observed as both an object and an array
-(structural polymorphism), the value is a JSON array of exactly two
-elements:
-
-```json
-{
-    "$.data[*]": [
-        { ".nested": "STRING", "#": "ARRAY_ELEMENT" },
-        "(INTEGER x 2)"
+    "model": { "…": "…" },
+    "uniqueKeys": [
+        { "id": "by-email", "fields": ["$.email"] },
+        { "id": "by-org-and-handle", "fields": ["$.org", "$.handle"] }
     ]
 }
 ```
 
-- Element `[0]`: the object-node descriptor.
-- Element `[1]`: the array-node type descriptor.
+## SIMPLE_VIEW
 
-## Type descriptors
+The `model` value is a flat JSON object whose **keys are node paths** and whose
+**values are node descriptors**. The nested tree is flattened into this
+single-depth map, and every descriptor is an object describing one structural
+level.
 
-Type descriptors appear as values for data fields (`.fieldName` keys)
-and for array nodes.
+### Node paths
 
-### Primitive type descriptor
+Node paths use JSONPath syntax rooted at `$`, and match the `jsonPath` a search
+condition would use to address the same place.
 
-A JSON string containing a single `DataType` name or a polymorphic set.
+| Path                    | Meaning                                                             |
+|-------------------------|---------------------------------------------------------------------|
+| `$`                     | The root object                                                     |
+| `$.address`             | A nested object field                                               |
+| `$.laureates[*]`        | The elements of the `laureates` array on the root object            |
+| `$.orders[*].lines[*]`  | The elements of `lines`, nested inside `orders` array elements      |
 
-**Monomorphic** (single type):
+One `[*]` per array level. Node paths are sorted lexicographically in the
+output, and every export contains at least the root node `$`.
+
+### Node descriptors
+
+A node descriptor is a JSON object with two kinds of entry.
+
+**Data fields — keys starting with `.`** carry the field's
+[type descriptor](#type-descriptors):
+
+```json
+{
+    ".category": "STRING",
+    ".year": "YEAR",
+    ".score": "DOUBLE"
+}
+```
+
+An array field's key carries one `[*]` per array level, and the value is the
+type of the element at that depth:
+
+```json
+{
+    ".tags[*]": "STRING",
+    ".matrix[*][*]": "INTEGER"
+}
+```
+
+An array level whose elements were never observed — the empty-array seed the
+codec preserves — declares the level but not the element type, and reads
+`"NULL"`:
+
+```json
+{ ".e[*]": "NULL" }
+```
+
+**Structural fields — keys starting with `#`** mark this node's role. Only two
+values are emitted:
+
+| Key            | Value             | Meaning                                                    |
+|----------------|-------------------|------------------------------------------------------------|
+| `#`            | `"ARRAY_ELEMENT"` | This node describes the elements of its parent array        |
+| `#.fieldName`  | `"OBJECT"`        | `fieldName` carries object structure and has its own node   |
+
+A nested object is **not** inlined into its parent with a dotted key. It gets a
+`#.fieldName` marker in the parent and a node of its own:
+
+```json
+{
+    "$": { "#.address": "OBJECT", ".name": "STRING" },
+    "$.address": { ".city": "STRING", ".zip": "STRING" }
+}
+```
+
+Within a node, keys are sorted; structural keys (`#`) sort before data keys
+(`.`) because `#` precedes `.` in ASCII.
+
+### Kind unions
+
+A field observed as more than one kind declares — and enforces — each of them,
+so the export names each branch. A field seen as both a string and an object
+carries both a data entry and a structural marker, with the object branch
+getting its own node:
+
+```json
+{
+    "$": { "#.o": "OBJECT", ".o": "STRING" },
+    "$.o": { ".a": "INTEGER" }
+}
+```
+
+A field seen as both a scalar and an array names both spellings in one node:
+
+```json
+{ ".poly": "STRING", ".poly[*]": "STRING" }
+```
+
+Both branches are enforced, so both are shown. Before cyoda-go v0.8.4 only the
+container branch rendered, which made two models that enforce differently look
+identical.
+
+### Type descriptors
+
+A type descriptor is a JSON string: either one `DataType` name, or a
+bracketed set when the field declares several.
+
+**Monomorphic:**
 
 ```
 "STRING"
 ```
 
-**Polymorphic** (multiple observed types for the same field, enclosed in
-brackets):
+**Polymorphic:**
 
 ```
 "[INTEGER, STRING]"
 ```
 
-### Supported DataType values
+Types inside the brackets are sorted by the `DataType` enum ordering: the
+integer families, then the decimal families, then text, temporal, identifier,
+binary, boolean, and `NULL` last.
 
-| DataType           | Description                                    |
-|--------------------|------------------------------------------------|
-| `STRING`           | Text value                                     |
-| `BYTE`             | 8-bit signed integer                           |
-| `SHORT`            | 16-bit signed integer                          |
-| `INTEGER`          | 32-bit signed integer                          |
-| `LONG`             | 64-bit signed integer                          |
-| `BIG_INTEGER`      | Arbitrary-precision integer (bounded by Int128) |
-| `UNBOUND_INTEGER`  | Arbitrary-precision integer (unbounded)        |
-| `FLOAT`            | 32-bit IEEE 754 floating point                 |
-| `DOUBLE`           | 64-bit IEEE 754 floating point                 |
-| `BIG_DECIMAL`      | Arbitrary-precision decimal (bounded, scale ≤ 18) |
-| `UNBOUND_DECIMAL`  | Arbitrary-precision decimal (unbounded)        |
-| `BOOLEAN`          | Boolean value                                  |
-| `CHARACTER`        | Single character                               |
-| `LOCAL_DATE`       | Date without time zone (ISO 8601)              |
-| `LOCAL_DATE_TIME`  | Date-time without time zone                    |
-| `LOCAL_TIME`       | Time without date                              |
-| `ZONED_DATE_TIME`  | Date-time with time zone                       |
-| `YEAR`             | Year value                                     |
-| `YEAR_MONTH`       | Year and month                                 |
-| `UUID_TYPE`        | UUID                                           |
-| `TIME_UUID_TYPE`   | Version 1 (time-based) UUID                    |
-| `BYTE_ARRAY`       | Binary data (base64-encoded)                   |
-| `NULL`             | Null / no value observed yet                   |
+### DataType values
 
-### Structural DataType values (used only in `#`-prefixed keys)
+Twenty types, and no others:
 
-| DataType           | Description                                    |
-|--------------------|------------------------------------------------|
-| `OBJECT`           | Marks a field as an object (has its own child node) |
-| `ARRAY`            | Marks a field as an array container             |
-| `ARRAY_ELEMENT`    | Marks this node as describing array elements   |
-| `TYPE_REFERENCE`   | Internal reference to another type definition  |
-| `POLYMORPHIC`      | Internal marker for polymorphic fields         |
+| Group | DataType | Description |
+|---|---|---|
+| Integer | `INTEGER` | 32-bit signed integer |
+| | `LONG` | 64-bit signed integer |
+| | `BIG_INTEGER` | Arbitrary-precision integer fitting Int128 |
+| | `UNBOUND_INTEGER` | Integer of arbitrary magnitude |
+| Decimal | `DOUBLE` | Decimal within the precision-15, scale-292 envelope |
+| | `BIG_DECIMAL` | Decimal fitting Trino's fixed-scale Int128 encoding |
+| | `UNBOUND_DECIMAL` | Decimal of arbitrary precision and scale |
+| Text | `STRING` | Variable-length character sequence |
+| | `CHARACTER` | A single Unicode character |
+| Temporal | `LOCAL_DATE` | Date without time zone |
+| | `LOCAL_DATE_TIME` | Date-time without time zone |
+| | `LOCAL_TIME` | Time without date |
+| | `ZONED_DATE_TIME` | Date-time with time zone |
+| | `YEAR` | Year value |
+| | `YEAR_MONTH` | Year and month |
+| Identifier | `UUID_TYPE` | UUID |
+| | `TIME_UUID_TYPE` | Version 1 (time-based) UUID |
+| Binary | `BYTE_ARRAY` | Binary data, base64-encoded |
+| Boolean | `BOOLEAN` | Boolean value |
+| Null | `NULL` | No type observed at this leaf |
 
-## Array type descriptors
+### SIMPLE_VIEW examples
 
-Array fields (keys ending in `[*]`) and detached array nodes use one of
-two array representations.
+Every example below is captured output from cyoda-go v0.8.4.
 
-### UniTypeArray (homogeneous)
-
-All elements have the same type. Serialized as a parenthesized string:
-
-```
-(<type> x <width>)
-```
-
-- `type`: a DataType name or polymorphic set.
-- `width`: the maximum observed array length.
-
-Examples:
-
-```
-"(STRING x 3)"            — array of 3 strings
-"(INTEGER x 10)"          — array of 10 integers
-"([INTEGER, STRING] x 4)" — array of 4 elements, each either integer or string
-```
-
-### MultiTypeArray (heterogeneous)
-
-Elements at different positions have different types. Serialized as a
-JSON array of type strings:
+**Flat object with an array of objects.** Note that `"2020"` classifies as
+`YEAR`, not `STRING` — a date-shaped sample value gives the field a temporal
+type at registration.
 
 ```json
-["INTEGER", "STRING", "BOOLEAN"]
-```
-
-Each element in the JSON array represents the type at that index
-position. Polymorphic elements within a multi-type array use the bracket
-notation:
-
-```json
-["[INTEGER, STRING]", "INTEGER", "[INTEGER, STRING]", "INTEGER"]
-```
-
-## Complete examples
-
-### Example 1: Simple flat object (Nobel Prize)
-
-**Input data shape:**
-
-```json
+// posted: {"category":"chemistry","year":"2020",
+//          "laureates":[{"firstname":"Emmanuelle","surname":"Charpentier","id":"991"}]}
 {
-    "category": "chemistry",
-    "year": "2020",
-    "laureates": [
-        { "firstname": "Emmanuelle", "id": "991", "motivation": "...", "share": "2", "surname": "Charpentier" }
-    ]
-}
-```
-
-**SIMPLE_VIEW export:**
-
-```json
-{
-    "currentState": "LOCKED",
+    "currentState": "UNLOCKED",
     "model": {
         "$": {
+            "#.laureates": "OBJECT",
             ".category": "STRING",
-            ".year": "STRING"
+            ".year": "YEAR"
         },
         "$.laureates[*]": {
+            "#": "ARRAY_ELEMENT",
             ".firstname": "STRING",
             ".id": "STRING",
-            ".motivation": "STRING",
-            ".share": "STRING",
-            ".surname": "STRING",
-            "#": "ARRAY_ELEMENT"
+            ".surname": "STRING"
         }
     }
 }
 ```
 
-### Example 2: Nested objects and primitive arrays
-
-**Input data shape:**
-
-```json
-{
-    "name": "Alice",
-    "scores": [95, 87, 92],
-    "address": {
-        "city": "London",
-        "zip": "SW1A"
-    }
-}
-```
-
-**SIMPLE_VIEW export:**
+**Nested object and a primitive array.** The array's element type is named
+once; its length is not part of the model.
 
 ```json
+// posted: {"name":"Alice","scores":[95,87,92],"address":{"city":"London","zip":"SW1A"}}
 {
     "currentState": "UNLOCKED",
     "model": {
         "$": {
-            ".address.city": "STRING",
-            ".address.zip": "STRING",
+            "#.address": "OBJECT",
             ".name": "STRING",
-            ".scores[*]": "(BYTE x 3)"
-        }
-    }
-}
-```
-
-Plain nested objects (non-array) are **inlined** into the parent node
-using dot-path notation (e.g., `.address.city`). They do not produce
-separate node entries or `#.fieldName` structural markers.
-
-### Example 3: Multi-dimensional array
-
-**Input data shape:**
-
-```json
-{
-    "matrix": [
-        [1, 2, 3],
-        [4, 5, 6]
-    ]
-}
-```
-
-**SIMPLE_VIEW export:**
-
-```json
-{
-    "currentState": "UNLOCKED",
-    "model": {
-        "$": {
-            ".matrix[*]": "(ARRAY_ELEMENT x 2)",
-            "#.matrix": "OBJECT"
+            ".scores[*]": "INTEGER"
         },
-        "$.matrix[*]": "(INTEGER x 3)"
-    }
-}
-```
-
-### Example 4: Polymorphic field
-
-**Input data shape** (after ingesting multiple records):
-
-```json
-{ "data": "hello" }
-{ "data": 42 }
-```
-
-**SIMPLE_VIEW export:**
-
-```json
-{
-    "currentState": "UNLOCKED",
-    "model": {
-        "$": {
-            ".data": "[INTEGER, STRING]"
+        "$.address": {
+            ".city": "STRING",
+            ".zip": "STRING"
         }
     }
 }
 ```
 
-### Example 5: Mixed node (structural polymorphism)
-
-**Input data shape** (after ingesting multiple records with different
-shapes):
+**Array of arrays.** One `[*]` per level, in the parent node. There is no
+detached node for the inner array.
 
 ```json
-{ "data": [{"nested": "primitive"}] }
-{ "data": [[123, 321], [456, 654]] }
+// posted: {"matrix":[[1,2,3],[4,5,6]]}
+{
+    "currentState": "UNLOCKED",
+    "model": { "$": { ".matrix[*][*]": "INTEGER" } }
+}
 ```
 
-**SIMPLE_VIEW export:**
+**Polymorphic scalar**, after ingesting `{"data":"hello"}` and `{"data":42}`:
+
+```json
+{
+    "currentState": "UNLOCKED",
+    "model": { "$": { ".data": "[INTEGER, STRING]" } }
+}
+```
+
+**Heterogeneous array.** Element types merge into one set, and a `null`
+contributes no type:
+
+```json
+// posted: {"row":[1,null,"three"]}
+{
+    "currentState": "UNLOCKED",
+    "model": { "$": { ".row[*]": "[INTEGER, STRING]" } }
+}
+```
+
+**Kind union across a container and a scalar**, after ingesting
+`{"data":[{"nested":"primitive"}]}` and `{"data":[[123,321],[456,654]]}`:
 
 ```json
 {
     "currentState": "UNLOCKED",
     "model": {
         "$": {
-            ".data[*]": "(ARRAY_ELEMENT x 2)",
-            "#.data": "OBJECT"
+            "#.data": "OBJECT",
+            ".data[*][*]": "INTEGER"
         },
-        "$.data[*]": [
-            { ".nested": "STRING", "#": "ARRAY_ELEMENT" },
-            "(INTEGER x 2)"
-        ]
-    }
-}
-```
-
-The `$.data[*]` entry is a JSON array of two elements because the system
-has observed `data` elements as both objects (with `.nested` field) and
-arrays of integers.
-
-### Example 6: Heterogeneous (multi-type) array
-
-**Input data shape:**
-
-```json
-{
-    "row": [1, null, "three"]
-}
-```
-
-**SIMPLE_VIEW export:**
-
-```json
-{
-    "currentState": "UNLOCKED",
-    "model": {
-        "$": {
-            ".row[*]": ["INTEGER", "NULL", "STRING"]
+        "$.data[*]": {
+            "#": "ARRAY_ELEMENT",
+            ".nested": "STRING"
         }
     }
 }
 ```
 
-## JSON Schema for the SIMPLE_VIEW response
+**Two levels of object arrays:**
+
+```json
+// posted: {"orders":[{"lines":[{"sku":"AX-1","qty":2}]}]}
+{
+    "currentState": "UNLOCKED",
+    "model": {
+        "$": { "#.orders": "OBJECT" },
+        "$.orders[*]": { "#": "ARRAY_ELEMENT", "#.lines": "OBJECT" },
+        "$.orders[*].lines[*]": {
+            "#": "ARRAY_ELEMENT",
+            ".qty": "INTEGER",
+            ".sku": "STRING"
+        }
+    }
+}
+```
+
+### JSON Schema for the SIMPLE_VIEW response
 
 ```json
 {
@@ -474,97 +353,125 @@ arrays of integers.
         },
         "model": {
             "type": "object",
-            "description": "Map of node paths to node descriptors. Keys are JSONPath-like strings (e.g., '$', '$.field[*]'). Always contains at least the root node '$'.",
+            "description": "Map of node paths to node descriptors. Always contains at least the root node '$'.",
             "propertyNames": {
-                "pattern": "^\\$(\\.[\\w][-\\w.]*(\\[\\*\\])*)*$"
+                "pattern": "^\\$(\\.[A-Za-z0-9_-]+(\\[\\*\\])*)*$"
             },
-            "additionalProperties": {
-                "$ref": "#/$defs/nodeDescriptor"
+            "additionalProperties": { "$ref": "#/$defs/nodeDescriptor" }
+        },
+        "uniqueKeys": {
+            "type": "array",
+            "description": "Composite unique keys declared on the model. Omitted when none are declared.",
+            "items": {
+                "type": "object",
+                "required": ["id", "fields"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
+                }
             }
         }
     },
     "$defs": {
         "dataType": {
             "type": "string",
-            "description": "A primitive DataType name.",
             "enum": [
-                "STRING", "BYTE", "SHORT", "INTEGER", "LONG",
-                "BIG_INTEGER", "UNBOUND_INTEGER",
-                "FLOAT", "DOUBLE", "BIG_DECIMAL", "UNBOUND_DECIMAL",
-                "BOOLEAN", "CHARACTER",
+                "INTEGER", "LONG", "BIG_INTEGER", "UNBOUND_INTEGER",
+                "DOUBLE", "BIG_DECIMAL", "UNBOUND_DECIMAL",
+                "STRING", "CHARACTER",
                 "LOCAL_DATE", "LOCAL_DATE_TIME", "LOCAL_TIME",
                 "ZONED_DATE_TIME", "YEAR", "YEAR_MONTH",
                 "UUID_TYPE", "TIME_UUID_TYPE",
-                "BYTE_ARRAY", "NULL"
+                "BYTE_ARRAY", "BOOLEAN", "NULL"
             ]
+        },
+        "typeDescriptor": {
+            "description": "One DataType name, or a bracketed set when the field declares several.",
+            "type": "string",
+            "examples": ["STRING", "INTEGER", "NULL", "[INTEGER, STRING]"]
         },
         "structuralDataType": {
             "type": "string",
-            "description": "DataType used in structural field values.",
-            "enum": ["OBJECT", "ARRAY", "ARRAY_ELEMENT", "TYPE_REFERENCE", "POLYMORPHIC"]
+            "description": "Value of a '#'-prefixed structural key.",
+            "enum": ["OBJECT", "ARRAY_ELEMENT"]
         },
-        "typeDescriptor": {
-            "description": "A field type: a single DataType, a polymorphic set '[TYPE1, TYPE2]', or an array spec '(TYPE x N)'.",
-            "type": "string",
-            "examples": [
-                "STRING",
-                "INTEGER",
-                "[INTEGER, STRING]",
-                "(STRING x 3)",
-                "([INTEGER, STRING] x 4)"
-            ]
-        },
-        "multiTypeArrayDescriptor": {
-            "description": "A heterogeneous array where each position may have a different type.",
-            "type": "array",
-            "items": {
-                "type": "string",
-                "description": "Type descriptor for the element at this index position."
-            },
-            "minItems": 1,
-            "examples": [
-                ["INTEGER", "STRING", "BOOLEAN"],
-                ["[INTEGER, STRING]", "INTEGER"]
-            ]
-        },
-        "objectNodeDescriptor": {
+        "nodeDescriptor": {
             "type": "object",
-            "description": "Describes an object structure node. Keys prefixed with '.' are data fields; keys prefixed with '#' are structural markers.",
+            "description": "Keys prefixed with '.' are data fields; keys prefixed with '#' are structural markers.",
             "propertyNames": {
-                "pattern": "^(\\.[\\w][-\\w.]*(\\[\\*\\])*)|(#\\.?[-\\w.]*)$"
+                "pattern": "^((\\.[A-Za-z0-9_-]+(\\[\\*\\])*)|(#(\\.[A-Za-z0-9_-]+)?))$"
             },
             "additionalProperties": {
-                "oneOf": [
+                "anyOf": [
                     { "$ref": "#/$defs/typeDescriptor" },
-                    { "$ref": "#/$defs/multiTypeArrayDescriptor" },
                     { "$ref": "#/$defs/structuralDataType" }
                 ]
             }
-        },
-        "arrayNodeDescriptor": {
-            "description": "Describes a detached array node. Either a UniTypeArray string or a MultiTypeArray JSON array.",
-            "oneOf": [
-                { "$ref": "#/$defs/typeDescriptor" },
-                { "$ref": "#/$defs/multiTypeArrayDescriptor" }
-            ]
-        },
-        "mixedNodeDescriptor": {
-            "description": "A node exhibiting structural polymorphism — observed as both object and array. Element [0] is the object descriptor, element [1] is the array descriptor.",
-            "type": "array",
-            "prefixItems": [
-                { "$ref": "#/$defs/objectNodeDescriptor" },
-                { "$ref": "#/$defs/arrayNodeDescriptor" }
-            ],
-            "minItems": 2,
-            "maxItems": 2
-        },
-        "nodeDescriptor": {
-            "description": "A node descriptor: object, array, or mixed.",
-            "oneOf": [
-                { "$ref": "#/$defs/objectNodeDescriptor" },
-                { "$ref": "#/$defs/arrayNodeDescriptor" },
-                { "$ref": "#/$defs/mixedNodeDescriptor" }
-            ]
+        }
+    }
+}
+```
+
+## JSON_SCHEMA
+
+The `JSON_SCHEMA` converter renders the same model as a JSON Schema document
+under the same envelope. Objects become `{"type": "object", "properties": …}`,
+arrays become `{"type": "array", "items": …}`, and leaves map onto JSON Schema
+primitives:
+
+| DataType | Rendered as |
+|---|---|
+| `INTEGER`, `LONG`, `BIG_INTEGER`, `UNBOUND_INTEGER` | `{"type": "integer"}` |
+| `DOUBLE`, `BIG_DECIMAL`, `UNBOUND_DECIMAL` | `{"type": "number"}` |
+| `STRING`, `CHARACTER` | `{"type": "string"}` |
+| `BOOLEAN` | `{"type": "boolean"}` |
+| `NULL` | `{"type": "null"}` |
+| `LOCAL_DATE` | `{"type": "string", "format": "date"}` |
+| `LOCAL_DATE_TIME`, `ZONED_DATE_TIME` | `{"type": "string", "format": "date-time"}` |
+| `LOCAL_TIME` | `{"type": "string", "format": "time"}` |
+| `YEAR` | `{"type": "string", "format": "year"}` |
+| `YEAR_MONTH` | `{"type": "string", "format": "year-month"}` |
+| `UUID_TYPE`, `TIME_UUID_TYPE` | `{"type": "string", "format": "uuid"}` |
+| `BYTE_ARRAY` | `{"type": "string", "format": "byte"}` |
+
+**A field declaring more than one branch renders as `anyOf`**, never `oneOf`.
+`oneOf` requires exactly one branch to match, and two `DataType`s can render
+the same shape — `INTEGER` and `LONG` both give `{"type": "integer"}` — so
+`oneOf` would reject a value the model admits.
+
+```json
+// posted: {"data":"hello"} then {"data":42}
+{
+    "currentState": "UNLOCKED",
+    "model": {
+        "type": "object",
+        "properties": {
+            "data": { "anyOf": [{ "type": "integer" }, { "type": "string" }] }
+        }
+    }
+}
+```
+
+The same rule covers a kind union. A field seen as both a scalar and an array
+renders as an `anyOf` over the array branch and the scalar branch:
+
+```json
+// posted: {"poly":"a"} then {"poly":["b","c"]}
+{
+    "currentState": "UNLOCKED",
+    "model": {
+        "type": "object",
+        "properties": {
+            "poly": {
+                "anyOf": [
+                    { "type": "array", "items": { "type": "string" } },
+                    { "type": "string" }
+                ]
+            }
         }
     }
 }
@@ -572,63 +479,61 @@ arrays of integers.
 
 ## Error responses
 
-| Status | Condition                     | Response Body                              |
-|--------|-------------------------------|--------------------------------------------|
-| 404    | Model not found               | RFC 7807 Problem Detail with `entityName` and `entityVersion` in `properties` |
-| 400    | Invalid converter value       | RFC 7807 Problem Detail with `parameter` and `invalidValue` in `properties`   |
+| Status | Condition               | Error code          |
+|--------|-------------------------|---------------------|
+| 404    | Model not found         | `MODEL_NOT_FOUND`   |
+| 400    | Unknown converter value | `BAD_REQUEST`       |
 
-**404 example:**
+**404 example** (captured):
 
 ```json
 {
     "type": "about:blank",
     "title": "Not Found",
     "status": 404,
-    "detail": "cannot find model entityName=nobel-prize, version=2",
-    "instance": "/api/model/export/SIMPLE_VIEW/nobel-prize/2",
+    "detail": "MODEL_NOT_FOUND: cannot find model entityName=nobel-prize, version=2",
+    "instance": "/model/export/SIMPLE_VIEW/nobel-prize/2",
     "properties": {
         "entityName": "nobel-prize",
-        "entityVersion": 2
+        "entityVersion": 2,
+        "errorCode": "MODEL_NOT_FOUND"
     }
 }
 ```
 
-## Key behaviors for consumers
+## Key behaviours for consumers
 
-1. **The root node `$` is always present** in the model. It represents
-   the top-level object of the entity.
+1. **The root node `$` is always present** in a `SIMPLE_VIEW` export. It
+   describes the top-level object of the entity.
 
-2. **Field ordering is deterministic.** Within each object node, data
-   fields (`.` prefix) are sorted alphabetically, followed by structural
-   fields (`#` prefix) also sorted alphabetically. Node paths in the
-   `model` object are sorted lexicographically.
+2. **Output is deterministic.** Node paths are sorted lexicographically, and
+   keys within a node are sorted, so two exports of the same model are
+   byte-identical.
 
-3. **Models evolve via merging.** As new entity instances are ingested,
-   the model grows: new fields appear, types may widen (e.g., `INTEGER`
-   → `[INTEGER, STRING]`), and array widths may increase. The
-   SIMPLE_VIEW always reflects the cumulative model.
+3. **Models evolve by merging.** As entities are ingested under a model whose
+   change level permits it, new fields appear, a leaf's declared types widen
+   (`INTEGER` → `[INTEGER, STRING]`), and a field can come to declare a new
+   kind. An array's length is not tracked and never changes the export.
 
-4. **Polymorphic types** use bracket notation `[TYPE1, TYPE2]` within a
-   single string. Types within the brackets are sorted by the
-   `DataType` enum ordering defined in cyoda-go (see
-   `internal/domain/model/schema/types.go` for the authoritative rule):
-   numeric types first (integer families, then decimal families), then
-   text types (`STRING`, `CHARACTER`), then temporal, identifier,
-   binary, boolean, and `NULL` last.
+4. **Every declared branch is exported.** A field that declares more than one
+   kind names each of them; the export describes what the model enforces, not
+   the route the model took into memory.
 
-5. **UniTypeArray vs MultiTypeArray:** If all array elements have the
-   same type, you get `(TYPE x N)`. If different positions have
-   different types, you get a JSON array `["TYPE1", "TYPE2", ...]`.
-   When element types converge through merging, a MultiTypeArray may
-   simplify back to a UniTypeArray.
+5. **An export is not an import format.** `SAMPLE_DATA` is the only converter
+   the import endpoint accepts; posting an export back to
+   `POST /model/import/JSON/SIMPLE_VIEW/…` returns
+   `400 BAD_REQUEST: unsupported import converter`. To establish a model, post
+   representative sample documents.
 
-6. **Structural fields indicate nesting.** A `#.fieldName` entry with
-   value `"OBJECT"` means that field has its own child node in the
-   model map. A `#` entry with value `"ARRAY_ELEMENT"` means this node
-   describes elements of its parent array.
+6. **Structural keys indicate nesting.** `#.fieldName: "OBJECT"` means that
+   field has a node of its own in the map; `#: "ARRAY_ELEMENT"` means this node
+   describes the elements of its parent array.
 
-7. **The SIMPLE_VIEW is round-trippable.** It can be exported and
-   re-imported via the import endpoint
-   (`POST /model/import/{dataFormat}/{converter}/{entityName}/{modelVersion}`,
-   e.g., `POST /model/import/JSON/SIMPLE_VIEW/{entityName}/{modelVersion}`)
-   without loss of structural information.
+## Where to go next
+
+- [Modeling entities](/build/modeling-entities/) — what a field declares, the
+  change-level ladder, and the field-name grammar.
+- [Searching entities](/build/searching-entities/#how-a-field-path-is-written) —
+  the path grammar these node paths mirror.
+- [JSON schema reference](/reference/schemas/) — the REST-API message schemas
+  generated from cyoda-go.

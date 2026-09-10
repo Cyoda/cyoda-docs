@@ -316,6 +316,18 @@ every `CYODA_KEEPALIVE_INTERVAL` seconds (default `10`).
 > implement the reconnection logic in [Section 12.1](#121-reconnection-strategy);
 > it is the only way back.
 
+> ⚠️ **Both variables take effect from cyoda-go v0.8.4.** They were parsed and
+> then never reached the gRPC server, so a deployment that tuned them was
+> running on the library defaults. Check the values you have set before
+> upgrading.
+
+Eviction now also fires on a **stalled write**, not only on inbound silence. If
+one server-to-client write has been blocked for `CYODA_KEEPALIVE_TIMEOUT`, the
+member is evicted even though it has been sending keep-alives — which catches a
+node that keeps pinging while the application behind it is stuck. Each member's
+stream has exactly one writer goroutine draining an outbox, so a slow consumer
+back-pressures its own stream rather than the server.
+
 ---
 
 # 6. Handling Processor Requests
@@ -776,6 +788,21 @@ The practical consequences:
 - `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
 - If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
 - **As of v0.8.3 this covers the search RPCs too.** A callback presenting a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` previously had it silently ignored — the interceptor was wired only for the write RPCs. A processor's writes therefore joined the originating transaction while its *searches* ran unjoined against last-committed state, returning stale results with no error to signal it. If you worked around this by re-reading entities after writing them, that workaround is no longer needed.
+- **Do not pass `pointInTime` on a read inside a joined transaction.** As of
+  v0.8.4 a point-in-time read is committed-only on PostgreSQL, matching what
+  the memory and SQLite backends always did — it previously ran on the caller's
+  own transaction connection and so answered with that transaction's
+  uncommitted writes. A callback that read its own uncommitted write that way
+  now gets `404 ENTITY_NOT_FOUND`. Omit the parameter: a **current-state** read
+  inside a transaction is read-your-own-writes correct.
+- **A request that joins an open transaction may not carry its own deadline.**
+  `transactionTimeoutMillis`, `transactionSize` and search's `timeoutMillis`
+  are rejected with `400` on a joined callback, which cannot impose a bound on
+  a transaction it does not own.
+- **What you return is governed by the model.** A processor's returned data is
+  validated exactly as a client write is, so writing a field the model does not
+  declare needs that model's `changeLevel` set. Otherwise the transition fails
+  `WORKFLOW_FAILED` and rolls back.
 
 Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#all-variables)):
 

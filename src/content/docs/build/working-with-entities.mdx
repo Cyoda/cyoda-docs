@@ -119,6 +119,70 @@ curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID} \
 
 Unlike `PUT`, **`If-Match` is required** — the merge is applied relative to the base you read, so patching a stale base risks a lost update. The token is the `meta.transactionId` from your last `GET`; a missing header returns `428 PRECONDITION_REQUIRED` and a stale one returns `412`. The merged result is validated strictly against the model schema — a `PATCH` never extends the model, even in an extend-permitting mode. The request is JSON-only (XML ⇒ `415`); RFC 6902 JSON Patch is recognised but returns `501` for now.
 
+## Bounding a write
+
+Every entity write accepts `transactionTimeoutMillis`, a bound on the time the
+server may spend before the **first commit**:
+
+```
+POST /api/entity/JSON/orders/1?transactionTimeoutMillis=10000
+```
+
+Exceeding it rolls the transaction back and fails with
+`408 TRANSACTION_TIMEOUT`, with nothing committed. On a chunked write — an
+array body split by `transactionWindow` — only the first chunk is covered;
+expiry after that surfaces as a `TRANSACTION_TIMEOUT` element in the per-chunk
+response rather than an HTTP `408`. Absent, there is no server-side timeout.
+
+The parameter is rejected with `400` on a request that joins an open
+transaction: a routed compute-node callback cannot impose its own deadline on a
+transaction it does not own. The same rule applies to `transactionSize` on
+delete and `timeoutMillis` on search. All three were accepted and silently
+ignored before cyoda-go v0.8.4 — a caller that has been sending them should
+expect them to start taking effect.
+
+## When a write is visible
+
+A `2xx` response to a write means the write is **visible to every subsequent
+read on every node**. There is no window in which a caller can write, read
+back, and miss its own data, and no cluster topology in which one node lags
+another for a committed write.
+
+Because that was already the contract, the `waitForConsistencyAfter` parameter
+could toggle nothing. It is retired from the seven entity write operations. A
+request that still carries it is accepted and the value ignored, so no
+integration breaks, but remove it: it never bought anything.
+
+A storage-layer problem is now reported as such. `503 STORAGE_UNAVAILABLE` is
+**retryable** and covers connection-pool exhaustion, a transaction aborted by
+the database's idle ceiling, and a connection going away mid-operation. It
+replaces a family of misleading `404 Not Found` answers: async-search status
+and results, trusted-key operations, the audit transaction lookup and several
+entity reads used to collapse any store error into "it does not exist", which
+told a client to stop retrying exactly when it should have kept going.
+
+## What the platform will not store
+
+A payload can be valid JSON and still be unstorable. Five shapes are now
+rejected at the boundary with `400`, on every storage backend and over both
+REST and gRPC:
+
+- **A NUL character** (U+0000) anywhere in the payload.
+- **Unpaired UTF-16 surrogates and invalid UTF-8.** The guard reads the raw
+  request bytes, which matters: a JSON decoder rewrites both forms to U+FFFD,
+  so validating the decoded value cannot see them and re-serialising would
+  store a character you never sent.
+- **A name repeated within one object.** It used to be read as the *last*
+  occurrence by schema validation, the `GET` response and unique-key
+  computation, and as the *first* by criteria, search and grouped statistics —
+  on the same bytes in the same request.
+- **Trailing content after the JSON value**, such as `{"x":1}}}`.
+- **A number outside PostgreSQL's `numeric` range.**
+
+Before cyoda-go v0.8.4 these reached the store and came back as `500` with a
+support ticket on PostgreSQL, while the memory and SQLite backends accepted
+them — so the set of storable values depended on which engine you were running.
+
 ## Delete
 
 Delete a single entity by id, or delete a matched subset of a model with a condition:
@@ -148,6 +212,34 @@ curl -X DELETE http://localhost:8080/api/entity/orders/1?verbose=true \
 The `DELETE /api/entity/{entityName}/{modelVersion}` endpoint honours an `AbstractConditionDto` request body and removes only the matching entities; an **empty body still means all**. `verbose=true` returns the deleted ids, and the response reports matched-vs-removed counts separately. A malformed condition returns `400 INVALID_CONDITION`.
 
 Supplying the condition matters: earlier releases ignored it and wiped the entire model. Always send the condition you intend (or omit the body deliberately when you really do mean "all").
+
+Both forms honour `pointInTime`, so a delete can be scoped to the world as it
+stood at an instant. The whole-model form ignored it until cyoda-go v0.8.4,
+deleting entities created after the instant and returning an empty id list
+beside a non-zero count.
+
+### Deleting in batches
+
+By default the whole selection is removed in one transaction. Pass
+`transactionSize` to remove it in independent, version-guarded batches instead:
+
+```
+DELETE /api/entity/orders/1?transactionSize=500
+```
+
+Batches already committed stay durable if a later one fails. A per-id version
+mismatch — the entity changed after it was selected — or a batch's commit
+failure is reported per id in `deleteResult.idToError` rather than retried.
+
+Without `pointInTime`, a batched delete re-selects before every batch, so a
+model into which matching entities are created at least as fast as they are
+removed would never converge. That case now fails with a retryable
+**`409 DELETE_NOT_CONVERGED`** at the batch cap, leaving the already-committed
+batches deleted, rather than running forever. Pin the selection with
+`pointInTime` when you want a delete that provably terminates.
+
+`transactionSize` is rejected with `400` on a request that joins an open
+transaction.
 
 ## Search
 

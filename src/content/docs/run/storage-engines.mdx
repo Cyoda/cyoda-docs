@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 Cyoda runs on five storage configurations: four pluggable engines that
 ship with `cyoda-go` (in-memory, SQLite, PostgreSQL, and a commercial
 Cassandra plugin) plus the classic Kotlin runtime that has powered Cyoda
@@ -44,6 +46,21 @@ PostgreSQL plugin layers it on PostgreSQL `REPEATABLE READ`. The
 Cassandra plugin and the classic CPL runtime implement it against
 Cassandra primitives. The application has no way to tell which engine
 it is running against — and that is the point.
+
+A backend that diverges from the others on the same contract is treated as a
+defect rather than an accepted difference, and cyoda-go v0.8.4 closed a long
+list of them: compare-and-save comparing the expected transaction id literally
+and refusing an empty one, a write inside a transaction carrying that
+transaction's id, a point-in-time read inside a transaction being
+committed-only, text comparisons ordering by byte value, and a client
+disconnect aborting in-flight per-item work. Behaviour that used to depend on
+which engine you were running now does not.
+
+**A successful write is visible everywhere.** A `2xx` write response means the
+data is visible to every subsequent read on every node. There is no window in
+which a caller can write, read back and miss its own data, which is why the
+`waitForConsistencyAfter` request parameter is retired: it could toggle
+nothing.
 
 ## At a glance
 
@@ -95,6 +112,28 @@ unreliable on NFS), nor for any deployment that needs more than one
 `cyoda-go` process against the same data. If either of those applies,
 move to PostgreSQL.
 
+### Size the reader pool against your memory limit
+
+From cyoda-go v0.8.4 the SQLite plugin opens a dedicated pool of read
+connections, so a long undrained scan cannot starve concurrent writes.
+`CYODA_SQLITE_READER_POOL_SIZE` sizes it, defaulting to `GOMAXPROCS` clamped to
+the range 4–8.
+
+The memory cost is the thing to plan for. `CYODA_SQLITE_CACHE_SIZE` (default
+`64000` KiB) is **per connection**, so the resident ceiling is now
+`(readers + 1) × CYODA_SQLITE_CACHE_SIZE`. On an 8-CPU host at the defaults
+that is roughly 562 MiB, where a single connection was roughly 62.5 MiB.
+
+`GOMAXPROCS` follows the CPU quota and is blind to the memory limit, so a
+container that is generous on cores and tight on memory must lower the pool
+size, the cache size, or both.
+
+The plugin also no longer meters examined rows. `CYODA_SQLITE_SEARCH_SCAN_LIMIT`
+and the `SCAN_BUDGET_EXHAUSTED` error are removed — remove the variable from
+your configuration, it is no longer read. That closes the last search-behaviour
+divergence between SQLite and the other engines; bounding search *time* is the
+caller's job, and every search path streams rather than materialising a model.
+
 ## PostgreSQL
 
 The PostgreSQL plugin is `cyoda-go`'s production multi-node tier. A
@@ -115,6 +154,43 @@ in tenant scoping cannot leak data across tenants.
 Write throughput is bounded by the single PostgreSQL primary's write
 capacity. The cluster scales out for connection capacity and read
 fan-out, not for writes against a single PG primary.
+
+### Ceilings, saturation, and the upgrade window
+
+From cyoda-go v0.8.4 the plugin sets five configurable ceilings on the database
+side, all on by default. Each takes a Go duration; `0` disables that limit, and
+a malformed value fails startup rather than falling back to the default.
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `CYODA_POSTGRES_STATEMENT_TIMEOUT` | `5m` | Any single statement |
+| `CYODA_POSTGRES_IDLE_IN_TX_TIMEOUT` | `5m` | Idle gap inside an open transaction |
+| `CYODA_POSTGRES_ACQUIRE_TIMEOUT` | `10s` | Waiting for a pooled connection |
+| `CYODA_POSTGRES_MIGRATE_LOCK_TIMEOUT` | `5m` | Migration advisory lock |
+| `CYODA_POSTGRES_SEARCH_STATEMENT_TIMEOUT` | `30m` | Async-search statements |
+
+The idle-in-transaction ceiling is the one that interacts with application
+config: a workflow processor whose `responseTimeoutMs` exceeds it has its
+transaction aborted. The 30-second processor default sits well under the
+5-minute ceiling, so only deliberately long callouts are affected.
+
+Pool exhaustion, a transaction aborted by the idle ceiling, and a connection
+going away are all reported as a retryable **`503 STORAGE_UNAVAILABLE`** rather
+than queueing indefinitely or surfacing as an unexplained error. Saturation is
+observable: seven `cyoda_storage_pool_*` metrics are always exported at
+`/metrics`.
+
+<Aside type="caution" title="Upgrading a populated database blocks writers briefly">
+
+Migration `000008` adds an index to the `entities` table with a plain
+`CREATE INDEX`, not `CREATE INDEX CONCURRENTLY` — the concurrent form provably
+deadlocks cyoda-go's multi-node boot path. Writers to `entities` are blocked
+for the duration.
+
+Size a maintenance window against that table's row count before upgrading a
+populated deployment.
+
+</Aside>
 
 The plugin makes one explicit, accepted trade-off: each transaction is
 pinned to the `cyoda-go` node that opened it. If that node dies
