@@ -1,5 +1,5 @@
 import { glob } from 'glob';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -34,7 +34,7 @@ async function packageSchemas() {
 
   // Create ZIP archive
   const output = fs.createWriteStream(outputFile);
-  const archive = archiver('zip', {
+  const archive = new ZipArchive({
     zlib: { level: 9 } // Maximum compression
   });
 
