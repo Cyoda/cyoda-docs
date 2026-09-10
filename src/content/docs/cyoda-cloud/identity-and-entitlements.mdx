@@ -5,6 +5,9 @@ sidebar:
   order: 20
 ---
 
+import StepFlow from '../../../components/StepFlow.astro';
+import SequenceFlow from '../../../components/SequenceFlow.astro';
+
 :::caution[Design — not yet implemented]
 Cyoda Cloud is [being rebuilt](./status-and-roadmap/). This page
 describes the **current design we are working towards implementing**
@@ -100,19 +103,15 @@ Putting it together for a typical environment:
 
 **Key rotation flow**
 
-```mermaid
-flowchart TB
-    A[Old active key for `client` audience]
-    B[Issue new key for `client` audience]
-    C[Sign new tokens with new `keyId`]
-    D[Grace period: accept old and new tokens]
-    E[Invalidate old key]
+<StepFlow label="Signing key rotation flow">
 
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-```
+1. Old active key for the `client` audience
+2. Issue a new key for the `client` audience
+3. Sign new tokens with the new `keyId`
+4. Grace period: accept old and new tokens
+5. Invalidate the old key
+
+</StepFlow>
 
 ### Key rotation recommendations
 
@@ -180,18 +179,15 @@ The following example describes a typical setup using an external OIDC provider 
 3. **Register the OIDC provider in Cyoda Cloud** using the OIDC `.well-known/openid-configuration` URL and, optionally, the expected `iss` value.
 4. **Test login** via the OIDC provider, obtain an access token, and call a Cyoda API endpoint. Cyoda Cloud validates the token and auto-enrolls the user under your legal entity if needed.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant OIDC as OIDC Provider
-    participant Cyoda as Cyoda Cloud
+<SequenceFlow label="OIDC login and first API call">
 
-    User->>OIDC: Login with browser
-    OIDC-->>User: Redirect with access token
-    User->>Cyoda: Call API with bearer token
-    OIDC-->>Cyoda: Fetch JWKS to validate signature
-    Cyoda-->>User: Authorized response (user enrolled, roles applied)
-```
+1. **User → OIDC Provider** Login with browser
+2. **OIDC Provider → User** Redirect with access token
+3. **User → Cyoda Cloud** Call API with bearer token
+4. **OIDC Provider → Cyoda Cloud** Serve JWKS so the signature can be validated
+5. **Cyoda Cloud → User** Authorized response (user enrolled, roles applied)
+
+</SequenceFlow>
 
 ## JWT claims → role mapping
 

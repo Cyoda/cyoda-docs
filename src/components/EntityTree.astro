@@ -1,0 +1,138 @@
+---
+// src/components/EntityTree.astro — node tree for an entity decomposition.
+//
+// Replaces a mermaid `graph TD`. Wraps a nested bullet list authored in the
+// page markdown and draws elbow connectors between the levels, so the node
+// names stay selectable text rather than becoming an image.
+//
+// Bold marks a node that is projected into its own SQL table. The mermaid
+// version encoded that as a purple stroke and explained it only in the
+// surrounding prose; here the component renders an explicit legend.
+//
+// Connectors are per-item pseudo-elements: ::before is the vertical run down
+// the parent's gutter, ::after the horizontal stub into the label. The last
+// child truncates its vertical run at the elbow so the line does not overshoot.
+interface Props {
+  /** Accessible name for the tree as a whole. */
+  label: string;
+  /** Legend wording, read after the styled word "bold". */
+  tableLegend: string;
+}
+const { label, tableLegend } = Astro.props;
+---
+<div class="entity-tree" role="group" aria-label={label}>
+  <slot />
+  <p class="entity-tree__legend">
+    <span class="entity-tree__swatch">bold</span>
+    {tableLegend}
+  </p>
+</div>
+
+<style>
+  .entity-tree {
+    padding: 1.25rem;
+    margin: 1.5rem 0;
+    background: hsl(var(--cyoda-teal) / 0.04);
+    border: 1px solid hsl(var(--cyoda-teal) / 0.2);
+    border-radius: 0.5rem;
+    overflow-x: auto;
+  }
+
+  .entity-tree :global(ul) {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  /* Every level below the root indents into a gutter that holds the rail. */
+  .entity-tree :global(ul ul) {
+    padding-left: 1.1rem;
+    margin: 0;
+  }
+
+  .entity-tree :global(li) {
+    position: relative;
+    margin: 0;
+    padding: 0.15rem 0;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+
+  /* Connectors apply from the second level down; the root node has no parent
+   * to connect to. */
+  .entity-tree :global(ul ul > li) {
+    padding-left: 1rem;
+  }
+
+  .entity-tree :global(ul ul > li)::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: hsl(var(--cyoda-teal) / 0.45);
+  }
+
+  /* Last child: stop the vertical run at the elbow. */
+  .entity-tree :global(ul ul > li:last-child)::before {
+    bottom: auto;
+    height: 0.85rem;
+  }
+
+  .entity-tree :global(ul ul > li)::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.85rem;
+    width: 0.7rem;
+    height: 1px;
+    background: hsl(var(--cyoda-teal) / 0.45);
+  }
+
+  .entity-tree :global(code) {
+    font-family: var(--cyoda-font-mono);
+    font-size: 0.85rem;
+    background: none;
+    border: none;
+    padding: 0;
+    color: hsl(var(--cyoda-foreground) / 0.9);
+  }
+
+  /* A table-backed node: bold label, purple accent, matching the stroke the
+   * mermaid version used for the same three nodes. */
+  .entity-tree :global(li > strong),
+  .entity-tree :global(li > strong code) {
+    color: hsl(var(--cyoda-purple));
+    font-weight: 700;
+  }
+
+  :root[data-theme='dark'] .entity-tree :global(li > strong),
+  :root[data-theme='dark'] .entity-tree :global(li > strong code) {
+    /* #5A18AC is too dark to read on the dark surface; lift lightness. */
+    color: hsl(258 74% 72%);
+  }
+
+  .entity-tree__legend {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 1rem 0 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid hsl(var(--cyoda-teal) / 0.2);
+    font-size: 0.85rem;
+    color: hsl(var(--cyoda-foreground) / 0.8);
+  }
+
+  .entity-tree__swatch {
+    font-family: var(--cyoda-font-mono);
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: hsl(var(--cyoda-purple));
+  }
+
+  :root[data-theme='dark'] .entity-tree__swatch {
+    color: hsl(258 74% 72%);
+  }
+</style>
