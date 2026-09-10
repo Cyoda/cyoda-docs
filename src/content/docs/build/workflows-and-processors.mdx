@@ -72,56 +72,55 @@ An entity model can have multiple workflows, each with its own `criterion` at
 the workflow level. This allows different processing paths for different
 categories of entities within the same model.
 
-Selection runs **per call, on every door onto the engine** — entity creation, a
-named transition, a loopback re-evaluation, a scheduled transition firing, and
-`GET /entity/{entityId}/transitions` — with no caching in between:
+The engine selects the workflow on **every call**, and it caches nothing
+between calls. Five operations select a workflow: entity creation, a named
+transition, a loopback re-evaluation, a scheduled transition firing, and
+`GET /entity/{entityId}/transitions`.
 
-1. Iterate workflows in stored declaration order. Storage preserves the order
-   from the most recent import, and `MERGE` appends new workflows at the tail.
-2. Skip any workflow whose `active` flag is `false`. Inactive workflows are
-   invisible to selection regardless of their criterion.
-3. Evaluate each active workflow's `criterion` against the entity payload and
-   lifecycle metadata. A `null` or absent criterion matches unconditionally.
-4. The first active workflow whose criterion matches wins; later workflows are
-   not consulted.
-5. If no active workflow matches, the engine falls back to the embedded default
-   workflow, and says so — a warning on the response body and an
-   operator-visible log line carrying `reason=no_criterion_matched`.
+The engine applies these rules in order:
 
-Place an unconditional workflow **last** in the import array if you want it as
-a catch-all; active workflows declared after it are unreachable, for the same
-reason an unguarded automated transition shadows its successors.
+1. Read the workflows in stored declaration order. Storage keeps the order of
+   the most recent import, and `MERGE` adds new workflows at the end.
+2. Skip each workflow whose `active` flag is `false`. Selection ignores an
+   inactive workflow, whatever its criterion.
+3. Evaluate the `criterion` of each active workflow against the entity payload
+   and the lifecycle metadata. A `null` or absent criterion always matches.
+4. Select the first active workflow whose criterion matches. The engine does
+   not read the later workflows.
+5. If no active workflow matches, use the embedded default workflow. The engine
+   adds a warning to the response body and writes a log line that carries
+   `reason=no_criterion_matched`.
 
-Selection is audited. Each skipped workflow records a `WORKFLOW_SKIP` event
-carrying the criterion's rejection reason, and the chosen one a
-`WORKFLOW_FOUND` event, under the transaction driving the call.
-`GET /entity/{entityId}/transitions` is a pure read and records nothing.
+To make a workflow a catch-all, place it **last** in the import array and give
+it no criterion. An active workflow declared after it is unreachable, in the
+same way as an automated transition declared after an unguarded one.
 
-<Aside type="caution" title="Choose the selection field deliberately">
+The engine audits selection under the transaction that drives the call. It
+records a `WORKFLOW_SKIP` event for each skipped workflow, with the rejection
+reason of the criterion, and a `WORKFLOW_FOUND` event for the selected one.
+`GET /entity/{entityId}/transitions` is a read and records no event.
 
-Until cyoda-go v0.8.4 only creation selected by criterion. Every later
-operation resolved the workflow by "the first active definition that declares
-the entity's current state" — which, where definitions share state names (the
-normal shape for a per-kind machine), is always the *first* declared workflow,
-for every entity. Entities ran the wrong guards, processors and target states,
-silently and fail-open, while the creation audit showed the right binding.
+<Aside type="caution" title="Choose the selection field with care">
 
-Now that selection is re-evaluated per call, two design rules follow:
+Because the engine evaluates selection on every call, two rules apply to the
+field that a selection criterion reads.
 
-- **Select on fields a caller cannot rewrite in the same request.** The
-  criterion is evaluated against the payload of the request being served, so a
-  criterion over a client-writable field lets one request choose which
-  definition's guards apply to itself. Where definitions differ in what they
-  permit, the selection field is a security control — prefer an immutable field
-  or lifecycle metadata.
-- **Select on something that stays true for the entity's whole lifetime.** An
-  entity whose payload changes can re-bind to a different definition. If its
-  current state is not declared there, the engine does **not** fall through to
-  a definition that does declare it: a named transition fails
-  `400 WORKFLOW_FAILED` and a loopback settles as a no-op. A re-bind can also
-  retire a pending scheduled transition that was acting as a time-based
-  control — the task is discarded when it next comes due, recorded as
-  `SCHEDULED_TRANSITION_CANCEL` at its scheduled time rather than at the write.
+**Select on a field that the caller cannot rewrite in the same request.** The
+engine evaluates the criterion against the payload of the request that it
+serves. A criterion over a client-writable field therefore lets one request
+choose which definition guards it. Where definitions permit different
+operations, the selection field is a security control. Select on an immutable
+field, or on lifecycle metadata.
+
+**Select on a condition that stays true for the whole life of the entity.** An
+entity whose payload changes can bind to a different definition. If the new
+definition does not declare the entity's current state, the engine does **not**
+fall through to a definition that declares it. A named transition fails with
+`400 WORKFLOW_FAILED`, and a loopback ends as a no-op.
+
+A new binding can also discard a pending scheduled transition. The engine
+deletes the task when the task next becomes due, and records
+`SCHEDULED_TRANSITION_CANCEL` at that time, not at the write.
 
 </Aside>
 
@@ -506,17 +505,20 @@ Group criteria combine multiple conditions using logical operators.
 - `operator`: Logical operator combining conditions — exactly `AND`, `OR` or `NOT`, case-sensitive
 - `conditions`: Array of criteria (can be `simple`, `function`, `group`, `lifecycle`, or `array` types — supports arbitrary nesting)
 
-`AND` and `OR` take any number of entries, including zero: an empty `AND` is
-`true` and an empty `OR` is `false`. **`NOT` takes exactly one entry** — zero,
-or two or more, is rejected at import with `400 VALIDATION_FAILED`. Write
-`NOT(A AND B)` by nesting rather than as a two-entry list.
+`AND` and `OR` take any number of entries, including zero. An empty `AND` is
+`true`, and an empty `OR` is `false`.
 
-`NOT` inverts its child's answer rather than being rewritten into the child's
-negative twin, and that distinction changes which entities pass a guard.
-`NOT($.tags[*] EQUALS "red")` fires when **no** element equals `"red"`, while
-`$.tags[*] NOT_EQUAL "red"` fires when **some** element differs. `NOT` over an
-empty list, an explicit `null` or an absent field fires, because the wrapped
-leaf is false in all three cases. See
+**`NOT` takes exactly one entry.** Zero entries, or two or more, is rejected at
+import with `400 VALIDATION_FAILED`. To negate a group, nest the group inside
+the `NOT`.
+
+`NOT` inverts the answer of its child. The engine does not replace it with the
+negative form of the leaf operator, and the two forms select different
+entities. `NOT($.tags[*] EQUALS "red")` fires when **no** element equals
+`"red"`. `$.tags[*] NOT_EQUAL "red"` fires when **some** element is different.
+
+`NOT` also fires over an empty list, an explicit `null` and an absent field,
+because the wrapped leaf is false in all three states. See
 [negation](/build/searching-entities/#negation-with-not) for the full contract.
 
 ### Function Criteria
@@ -624,29 +626,26 @@ evaluation model — type-directed comparison, null handling, the `LIKE` grammar
 — see [predicate semantics](/build/searching-entities/#predicate-semantics);
 criteria and search share one kernel, so the rules are identical.
 
-### A criterion is validated at import, and fails the save at evaluation
+### Criterion validation
 
-Criteria and search conditions are held to the same
+Criteria and search conditions follow the same
 [path grammar](/build/searching-entities/#how-a-field-path-is-written) and the
-same operator catalogue, enforced in two places.
+same operator catalogue. The engine enforces them in two places.
 
-**At import**, a criterion's `jsonPath`, operator names and `LIKE` /
-`MATCHES_PATTERN` operands are checked, and a failure rejects the whole import
-with `400 VALIDATION_FAILED`. Until cyoda-go v0.8.4 a criterion on a bare path
-such as `amount` imported cleanly and then guarded a transition that silently
-never fired. Workflows already stored keep evaluating and will fail on their
-next re-import — regenerate import payloads before upgrading.
+**At import**, the engine checks each criterion's `jsonPath`, its operator
+names, and its `LIKE` and `MATCHES_PATTERN` operands. A failure rejects the
+whole import with `400 VALIDATION_FAILED`. A stored workflow continues to
+evaluate, and it fails at its next import.
 
-**At evaluation**, a criterion that cannot be answered now fails the write it
-is guarding rather than being treated as "not satisfied":
+**At evaluation**, a criterion that the engine cannot answer fails the write
+that it guards:
 
-- A criterion naming a field the model does not declare aborts the save with
-  `400 WORKFLOW_FAILED` and rolls it back. A misspelled field name used to mean
-  a transition that silently never fired.
-- A criterion carrying an operator nobody can evaluate fails the save rather
-  than short-circuiting past it.
-- A model-store outage during criterion evaluation is reported rather than
-  masked by a structural error on a sibling conjunct.
+- A criterion that names a field that the model does not declare stops the save
+  with `400 WORKFLOW_FAILED`, and the engine rolls the save back.
+- A criterion that carries an operator that no evaluator supports fails the
+  save.
+- A model-store failure during evaluation fails the save. A structural error on
+  another condition in the same group does not hide it.
 
 ## Processors
 
@@ -657,18 +656,16 @@ To fire a transition on a delay rather than on an API call or a cascade, you do
 not attach a processor: you put a [`schedule`](#scheduled-transitions) on the
 transition itself.
 
-<Aside type="caution" title="A processor's returned data is governed by the model">
+<Aside type="caution" title="The model governs the data a processor returns">
 
-Data a processor returns is validated exactly as a client's write is: it must
-be storable, and it must satisfy the model's schema. A processor introducing a
-field the model does not declare needs that model's
-[`changeLevel`](/build/modeling-entities/#the-change-level-ladder) to permit it;
-otherwise the transition fails with `WORKFLOW_FAILED` and rolls back, leaving
-neither the entity nor any schema change behind.
+The engine validates data that a processor returns in the same way as a client
+write. The data must be storable, and it must satisfy the model's schema.
 
-Until cyoda-go v0.8.4 a processor could write content no backend could store,
-or fields outside the model — producing an entity the API would hand back and
-then refuse to accept on a subsequent `PUT`.
+A processor that writes a field that the model does not declare needs the
+model's [`changeLevel`](/build/modeling-entities/#the-change-level-ladder) to
+permit the change. If the level does not permit it, the transition fails with
+`WORKFLOW_FAILED` and rolls back. The engine stores neither the entity nor a
+schema change.
 
 </Aside>
 

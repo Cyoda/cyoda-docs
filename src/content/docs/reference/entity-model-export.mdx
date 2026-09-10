@@ -6,31 +6,19 @@ sidebar:
 ---
 
 import VendoredBanner from '../../../components/VendoredBanner.astro';
-import { Aside } from '@astrojs/starlight/components';
 
 <VendoredBanner stability="evolving" />
 
-A model export returns the full structural model of an entity type — every
-node, every field, every declared type — in a compact JSON form. Two converters
-render it: **`SIMPLE_VIEW`**, Cyoda's native path-keyed form, and
-**`JSON_SCHEMA`**, a JSON Schema document. This page is the wire-format
-specification for both. For the conceptual context — what a model is, how
-discovery, widening and locking work — see
+A model export returns the full structural model of an entity type in a
+compact JSON form. It carries every node, every field and every declared type.
+
+Two converters render the model. **`SIMPLE_VIEW`** is Cyoda's native
+path-keyed form. **`JSON_SCHEMA`** is a JSON Schema document. This page is the
+wire-format specification for both.
+
+For the concepts behind a model, and for discovery, widening and locking, see
 [Modeling entities](/build/modeling-entities/) and
 [Entities and lifecycle](/concepts/entities-and-lifecycle/).
-
-<Aside type="caution" title="The wire format changed in cyoda-go v0.8.4">
-
-Three things a pre-v0.8.4 consumer relied on are gone. Array descriptors of the
-form `(TYPE x N)` and their heterogeneous counterpart, a JSON array of
-per-position types, no longer exist — an array's length was never part of the
-model and is no longer reported as if it were. Detached array nodes and the
-two-element "mixed node" are gone with them: every node descriptor is now an
-object descriptor. And `JSON_SCHEMA` renders a multi-branch field as `anyOf`
-rather than `oneOf`, because two branches can render the same JSON Schema shape
-and `oneOf` would then reject a value the model admits.
-
-</Aside>
 
 ## Endpoint
 
@@ -71,15 +59,14 @@ keys.
 
 ## SIMPLE_VIEW
 
-The `model` value is a flat JSON object whose **keys are node paths** and whose
-**values are node descriptors**. The nested tree is flattened into this
-single-depth map, and every descriptor is an object describing one structural
-level.
+The `model` value is a flat JSON object. Its **keys are node paths**, and its
+**values are node descriptors**. This single-depth map holds the full nested
+tree. Each descriptor is an object, and it describes one structural level.
 
 ### Node paths
 
-Node paths use JSONPath syntax rooted at `$`, and match the `jsonPath` a search
-condition would use to address the same place.
+A node path uses JSONPath syntax rooted at `$`. It is the same path that a
+search condition uses to address the same place.
 
 | Path                    | Meaning                                                             |
 |-------------------------|---------------------------------------------------------------------|
@@ -88,8 +75,8 @@ condition would use to address the same place.
 | `$.laureates[*]`        | The elements of the `laureates` array on the root object            |
 | `$.orders[*].lines[*]`  | The elements of `lines`, nested inside `orders` array elements      |
 
-One `[*]` per array level. Node paths are sorted lexicographically in the
-output, and every export contains at least the root node `$`.
+Write one `[*]` for each array level. The server sorts the node paths
+lexicographically. Every export contains the root node `$`.
 
 ### Node descriptors
 
@@ -116,9 +103,8 @@ type of the element at that depth:
 }
 ```
 
-An array level whose elements were never observed — the empty-array seed the
-codec preserves — declares the level but not the element type, and reads
-`"NULL"`:
+An array level whose elements were never observed declares the level, but not
+the element type. Its value is `"NULL"`:
 
 ```json
 { ".e[*]": "NULL" }
@@ -142,15 +128,16 @@ A nested object is **not** inlined into its parent with a dotted key. It gets a
 }
 ```
 
-Within a node, keys are sorted; structural keys (`#`) sort before data keys
-(`.`) because `#` precedes `.` in ASCII.
+The server sorts the keys inside a node. Structural keys (`#`) come before
+data keys (`.`), because `#` precedes `.` in ASCII.
 
 ### Kind unions
 
-A field observed as more than one kind declares — and enforces — each of them,
-so the export names each branch. A field seen as both a string and an object
-carries both a data entry and a structural marker, with the object branch
-getting its own node:
+A field observed in more than one kind declares each kind, and the model
+enforces each one. The export therefore names each branch.
+
+A field seen as both a string and an object carries a data entry and a
+structural marker. The object branch gets a node of its own:
 
 ```json
 {
@@ -159,15 +146,13 @@ getting its own node:
 }
 ```
 
-A field seen as both a scalar and an array names both spellings in one node:
+A field seen as both a scalar and an array names both forms in one node:
 
 ```json
 { ".poly": "STRING", ".poly[*]": "STRING" }
 ```
 
-Both branches are enforced, so both are shown. Before cyoda-go v0.8.4 only the
-container branch rendered, which made two models that enforce differently look
-identical.
+The model enforces both branches, so the export names both.
 
 ### Type descriptors
 
@@ -219,10 +204,8 @@ Twenty types, and no others:
 
 ### SIMPLE_VIEW examples
 
-Every example below is captured output from cyoda-go v0.8.4.
-
-**Flat object with an array of objects.** Note that `"2020"` classifies as
-`YEAR`, not `STRING` — a date-shaped sample value gives the field a temporal
+**Flat object with an array of objects.** In this example `"2020"` classifies
+as `YEAR`, not `STRING`. A date-shaped sample value gives the field a temporal
 type at registration.
 
 ```json
@@ -438,10 +421,11 @@ primitives:
 | `UUID_TYPE`, `TIME_UUID_TYPE` | `{"type": "string", "format": "uuid"}` |
 | `BYTE_ARRAY` | `{"type": "string", "format": "byte"}` |
 
-**A field declaring more than one branch renders as `anyOf`**, never `oneOf`.
-`oneOf` requires exactly one branch to match, and two `DataType`s can render
-the same shape — `INTEGER` and `LONG` both give `{"type": "integer"}` — so
-`oneOf` would reject a value the model admits.
+**A field that declares more than one branch renders as `anyOf`**, never
+`oneOf`. `oneOf` accepts a value only when exactly one branch matches it. Two
+`DataType` values can render the same shape, because `INTEGER` and `LONG` both
+give `{"type": "integer"}`. `anyOf` therefore accepts every value that the
+model admits.
 
 ```json
 // posted: {"data":"hello"} then {"data":42}
@@ -510,24 +494,23 @@ renders as an `anyOf` over the array branch and the scalar branch:
    keys within a node are sorted, so two exports of the same model are
    byte-identical.
 
-3. **Models evolve by merging.** As entities are ingested under a model whose
-   change level permits it, new fields appear, a leaf's declared types widen
-   (`INTEGER` → `[INTEGER, STRING]`), and a field can come to declare a new
-   kind. An array's length is not tracked and never changes the export.
+3. **Models evolve by merging.** When you ingest entities under a model whose
+   change level permits it, new fields appear, the declared types of a leaf
+   widen (`INTEGER` → `[INTEGER, STRING]`), and a field can declare a new kind.
+   The export does not report the length of an array.
 
 4. **Every declared branch is exported.** A field that declares more than one
-   kind names each of them; the export describes what the model enforces, not
-   the route the model took into memory.
+   kind names each kind. The export describes what the model enforces.
 
 5. **An export is not an import format.** `SAMPLE_DATA` is the only converter
-   the import endpoint accepts; posting an export back to
-   `POST /model/import/JSON/SIMPLE_VIEW/…` returns
+   that the import endpoint accepts. A `POST` of an export to
+   `/model/import/JSON/SIMPLE_VIEW/…` returns
    `400 BAD_REQUEST: unsupported import converter`. To establish a model, post
    representative sample documents.
 
-6. **Structural keys indicate nesting.** `#.fieldName: "OBJECT"` means that
-   field has a node of its own in the map; `#: "ARRAY_ELEMENT"` means this node
-   describes the elements of its parent array.
+6. **Structural keys show the nesting.** `#.fieldName: "OBJECT"` means that the
+   field has a node of its own in the map. `#: "ARRAY_ELEMENT"` means that this
+   node describes the elements of its parent array.
 
 ## Where to go next
 

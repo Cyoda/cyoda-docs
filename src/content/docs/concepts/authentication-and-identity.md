@@ -107,18 +107,12 @@ Provider metadata — the JWKS used to verify signatures — is fetched from eac
 issuer's OIDC discovery document, refreshed across the cluster, and guarded
 against server-side request forgery.
 
-Three cache-convergence failures were closed in cyoda-go v0.8.4, all of which
-had left a node trusting the wrong thing until it was restarted. The
-provider-reload endpoint used to rebuild the provider list with **empty** key
-sources and never re-warm them, so calling the operation documented as
-refreshing the JWKS cache instead destroyed it — every federated token failed
-`401 unknown kid`, including for providers that were healthy before the call.
-Surviving key sources are now carried across the rebuild and every loaded
-provider is force-warmed, on the receiving node and on each broadcast peer. A
-provider whose IdP was unreachable at startup no longer stays keyless for the
-life of the process: failed warm-ups are retried every 30 seconds. And
-trusted-key revocation now propagates across the cluster, with OIDC providers
-converging after a dropped gossip broadcast rather than diverging silently.
+The key caches converge across the cluster. A provider reload keeps the key
+sources it already holds, and it warms every loaded provider, on the node that
+serves the call and on each peer it broadcasts to. If the identity provider is
+unreachable, the node retries the warm-up every 30 seconds. Trusted-key
+revocation propagates to every node, and the OIDC provider list converges again
+after a lost gossip broadcast.
 
 ## Where this is configured
 

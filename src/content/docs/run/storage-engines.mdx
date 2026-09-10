@@ -47,20 +47,15 @@ Cassandra plugin and the classic CPL runtime implement it against
 Cassandra primitives. The application has no way to tell which engine
 it is running against — and that is the point.
 
-A backend that diverges from the others on the same contract is treated as a
-defect rather than an accepted difference, and cyoda-go v0.8.4 closed a long
-list of them: compare-and-save comparing the expected transaction id literally
-and refusing an empty one, a write inside a transaction carrying that
-transaction's id, a point-in-time read inside a transaction being
-committed-only, text comparisons ordering by byte value, and a client
-disconnect aborting in-flight per-item work. Behaviour that used to depend on
-which engine you were running now does not.
+The engines agree on the details of that contract, not only on its shape.
+Compare-and-save compares the expected transaction id literally and refuses an
+empty one. A write inside a transaction carries that transaction's id. A
+point-in-time read inside a transaction is committed-only. Text comparisons
+order by byte value. A client disconnect stops the in-flight per-item work.
 
-**A successful write is visible everywhere.** A `2xx` write response means the
-data is visible to every subsequent read on every node. There is no window in
-which a caller can write, read back and miss its own data, which is why the
-`waitForConsistencyAfter` request parameter is retired: it could toggle
-nothing.
+**A successful write is visible everywhere.** A `2xx` write response means that
+the data is visible to every later read on every node. A caller can write and
+then read its own data back.
 
 ## At a glance
 
@@ -114,25 +109,22 @@ move to PostgreSQL.
 
 ### Size the reader pool against your memory limit
 
-From cyoda-go v0.8.4 the SQLite plugin opens a dedicated pool of read
-connections, so a long undrained scan cannot starve concurrent writes.
-`CYODA_SQLITE_READER_POOL_SIZE` sizes it, defaulting to `GOMAXPROCS` clamped to
-the range 4–8.
+The SQLite plugin opens a dedicated pool of read connections, so a long scan
+does not block concurrent writes. `CYODA_SQLITE_READER_POOL_SIZE` sets the pool
+size. It defaults to `GOMAXPROCS`, limited to the range 4 to 8.
 
-The memory cost is the thing to plan for. `CYODA_SQLITE_CACHE_SIZE` (default
-`64000` KiB) is **per connection**, so the resident ceiling is now
-`(readers + 1) × CYODA_SQLITE_CACHE_SIZE`. On an 8-CPU host at the defaults
-that is roughly 562 MiB, where a single connection was roughly 62.5 MiB.
+Plan for the memory cost. `CYODA_SQLITE_CACHE_SIZE` (default `64000` KiB) is
+**per connection**. The resident ceiling is therefore
+`(readers + 1) × CYODA_SQLITE_CACHE_SIZE`. On an 8-CPU host with the default
+values, that is approximately 562 MiB.
 
-`GOMAXPROCS` follows the CPU quota and is blind to the memory limit, so a
-container that is generous on cores and tight on memory must lower the pool
-size, the cache size, or both.
+`GOMAXPROCS` follows the CPU quota, and it does not read the memory limit. In a
+container with many cores and little memory, lower the pool size, the cache
+size, or both.
 
-The plugin also no longer meters examined rows. `CYODA_SQLITE_SEARCH_SCAN_LIMIT`
-and the `SCAN_BUDGET_EXHAUSTED` error are removed — remove the variable from
-your configuration, it is no longer read. That closes the last search-behaviour
-divergence between SQLite and the other engines; bounding search *time* is the
-caller's job, and every search path streams rather than materialising a model.
+The plugin does not meter the rows that a search examines, and it applies no
+scan budget. Bound the *time* of a search from the caller. Every search path
+streams, so no search path holds a whole model in memory.
 
 ## PostgreSQL
 
@@ -157,9 +149,9 @@ fan-out, not for writes against a single PG primary.
 
 ### Ceilings, saturation, and the upgrade window
 
-From cyoda-go v0.8.4 the plugin sets five configurable ceilings on the database
-side, all on by default. Each takes a Go duration; `0` disables that limit, and
-a malformed value fails startup rather than falling back to the default.
+The plugin sets five configurable ceilings on the database side. All five are
+on by default. Each one takes a Go duration. Set a value to `0` to disable that
+limit. A malformed value stops the server at startup.
 
 | Variable | Default | Bounds |
 |---|---|---|
@@ -169,26 +161,23 @@ a malformed value fails startup rather than falling back to the default.
 | `CYODA_POSTGRES_MIGRATE_LOCK_TIMEOUT` | `5m` | Migration advisory lock |
 | `CYODA_POSTGRES_SEARCH_STATEMENT_TIMEOUT` | `30m` | Async-search statements |
 
-The idle-in-transaction ceiling is the one that interacts with application
-config: a workflow processor whose `responseTimeoutMs` exceeds it has its
-transaction aborted. The 30-second processor default sits well under the
-5-minute ceiling, so only deliberately long callouts are affected.
+The idle-in-transaction ceiling interacts with the application configuration.
+The database aborts the transaction of a workflow processor whose
+`responseTimeoutMs` is longer than that ceiling. The processor default of 30
+seconds is well below the 5-minute ceiling, so this affects long callouts only.
 
-Pool exhaustion, a transaction aborted by the idle ceiling, and a connection
-going away are all reported as a retryable **`503 STORAGE_UNAVAILABLE`** rather
-than queueing indefinitely or surfacing as an unexplained error. Saturation is
-observable: seven `cyoda_storage_pool_*` metrics are always exported at
-`/metrics`.
+Three conditions return a retryable **`503 STORAGE_UNAVAILABLE`**: the pool
+could not supply a connection, the idle ceiling aborted the transaction, and
+the connection went away. Seven `cyoda_storage_pool_*` metrics report pool
+saturation at `/metrics`. They are always on.
 
-<Aside type="caution" title="Upgrading a populated database blocks writers briefly">
+<Aside type="caution" title="Migration 000008 blocks writers to the entities table">
 
 Migration `000008` adds an index to the `entities` table with a plain
-`CREATE INDEX`, not `CREATE INDEX CONCURRENTLY` — the concurrent form provably
-deadlocks cyoda-go's multi-node boot path. Writers to `entities` are blocked
-for the duration.
+`CREATE INDEX`. Writers to `entities` are blocked while the index builds.
 
-Size a maintenance window against that table's row count before upgrading a
-populated deployment.
+Before you run this migration on a populated deployment, plan a maintenance
+window. Size the window against the row count of the `entities` table.
 
 </Aside>
 

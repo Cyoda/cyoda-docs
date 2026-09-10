@@ -72,15 +72,13 @@ reconcile, which would cause inter-node auth to drift.
   readiness probe to the one the chart exposes.
 - **Readiness and liveness probes.** Both are wired by default; tune if
   your control plane has stricter latency budgets.
-- **A node that panics withdraws itself, and stays down.** From cyoda-go
-  v0.8.4 a recovered panic in engine or store work marks the node
-  permanently unhealthy: `/health` reports `503 DOWN` and `/readyz` reports
-  `503`, so Kubernetes removes the pod from its Service within about 10–15
-  seconds. `/livez` is unchanged, which is deliberate — the node's state is
-  unverified, so it is withdrawn rather than restarted into the same
-  condition. Know the bound: peer-forwarded work keeps arriving, established
-  connections stay open, and nothing restarts it. Read the ticket id from the
-  log and replace the pod.
+- **A node that panics withdraws itself and stays down.** A recovered panic in
+  engine or store work marks the node permanently unhealthy. `/health` reports
+  `503 DOWN` and `/readyz` reports `503`, so Kubernetes removes the pod from
+  its Service in approximately 10 to 15 seconds. `/livez` continues to pass, so
+  Kubernetes does not restart the pod. Three limits apply: peer-forwarded work
+  continues to arrive, established connections stay open, and nothing restarts
+  the node. Read the ticket id from the log, then replace the pod.
 - **Pod Disruption Budgets.** Set a minimum available count that matches
   your replica count minus one so rolling upgrades and node drains do not
   take the service below quorum.

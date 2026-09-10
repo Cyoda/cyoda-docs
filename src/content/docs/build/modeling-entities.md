@@ -27,20 +27,24 @@ by the order.
 Cyoda gives you two structural contracts for an entity model. The right
 choice depends on how exposed the model is to outside producers.
 
-**Discover (loose).** For a new model you do not write a schema file; you
-post a representative sample and Cyoda records the fields, their types, and the
-shape of nested arrays and objects. The body may be one JSON object — one
-sample document — or a JSON array of objects, read as several sample documents
-and merged exactly as successive imports would be. Anything else, a scalar or
-an array holding a non-object, is `400 VALIDATION_FAILED` naming the offending
-element. New samples **widen** the schema: a field seen as `INTEGER` once and
-as `STRING` later declares both. Use discover mode when you are prototyping,
-exploring a dataset, or have not yet fixed the contract with upstream
-producers.
+**Discover (loose).** For a new model you do not write a schema file. You post
+a representative sample, and Cyoda records the fields, their types, and the
+shape of nested arrays and objects.
 
-An array's **length** is not part of the model. A field declared as an array of
-strings holds an array of any length, at every change level; there is no
-"widest array seen" statistic and no path spelling that addresses a count.
+The body is one JSON object, which is one sample document. It can also be a
+JSON array of objects, which is several sample documents. Cyoda merges the
+array elements in the same way as successive imports. Any other body, such as a
+scalar or an array that holds a non-object, is `400 VALIDATION_FAILED`. The
+message names the element that caused the failure.
+
+New samples **widen** the schema. A field seen first as `INTEGER` and later as
+`STRING` declares both types. Use discover mode when you prototype, when you
+explore a dataset, or when the contract with upstream producers is not yet
+fixed.
+
+The **length** of an array is not part of the model. A field declared as an
+array of strings holds an array of any length, at every change level. No path
+addresses the count of elements.
 
 **Lock (strict).** Once the shape is stable, lock the model. After
 locking, any incoming entity that does not structurally match the current
@@ -65,54 +69,59 @@ lock-and-reject.
 
 ## What a field declares
 
-A field declares a **set of kinds** — scalar, object, array — and, for a scalar,
-a set of types. Every kind the field declares is admissible at every change
-level, and every one of them is enforced: a field declared `STRING` accepts a
-string and rejects an array or an object with `400 VALIDATION_FAILED`, naming
-each kind it does declare. A field declares more than one kind by being
-observed in each, either while the model is `UNLOCKED` or through a
-`STRUCTURAL` change on a locked one.
+A field declares a **set of kinds**: scalar, object and array. For a scalar, it
+also declares a set of types. Cyoda enforces every kind that the field
+declares, and every declared kind is admissible at every change level. A field
+declared `STRING` accepts a string. It rejects an array or an object with
+`400 VALIDATION_FAILED`, and the message names each kind that the field
+declares.
 
-A field admits a **value** when the value's kind matches one the field declares
-*and* that declared type's own admission test accepts the value. This is a
-direct, per-value test rather than a widening lattice over a classified label,
-and the difference is visible:
+A field declares more than one kind when Cyoda observes it in each kind. This
+happens while the model is `UNLOCKED`, or through a `STRUCTURAL` change on a
+locked model.
+
+A field admits a **value** when two conditions are true. The kind of the value
+matches a kind that the field declares. The admission test of the declared type
+accepts the value. Cyoda applies this test to each value:
 
 - A field declared `DOUBLE` accepts `1000`, `1000.0`, `1e3` and `2147483648`
-  with no schema change at all, because each value's own precision and scale
-  fit `DOUBLE`.
-- The same field needs a `TYPE` change for `9007199254740993`, which wants
-  sixteen significant digits — past what `DOUBLE` holds exactly — and at `TYPE`
-  it widens to `UNBOUND_DECIMAL`, the narrowest type holding both.
+  with no schema change. The precision and scale of each value fit `DOUBLE`.
+- The same field needs a `TYPE` change for `9007199254740993`. That value needs
+  sixteen significant digits, which is more than `DOUBLE` holds exactly. At
+  `TYPE`, the field widens to `UNBOUND_DECIMAL`, the narrowest type that holds
+  both values.
 - A field declared `STRING` holds `"2026-03-01"` with no schema change, because
   `STRING` admits every string. A field acquires a temporal type such as
   `LOCAL_DATE` at **registration**, from sample data that shows a date-shaped
-  value; an ordinary write to an already-`STRING` field does not grow that
-  declaration on its own.
+  value. A write to a field already declared `STRING` does not add a temporal
+  type.
 
-`null` follows the declaration like any other value: a scalar field always
-accepts it, a container field accepts it where the model observed one, and it
-never widens the model.
+`null` follows the declaration like any other value. A scalar field always
+accepts `null`. A container field accepts `null` where the model observed it.
+`null` does not widen the model.
 
 ## Field names must be addressable
 
-A field name is accepted only if it is a valid path segment: one or more ASCII
-letters, digits, `_` or `-`. Spaces, dots, quotes, brackets, `$`, `@`, `:`, the
-evaluator's metacharacters and any non-ASCII character are rejected with
-`400 VALIDATION_FAILED`, naming the offending key and the object that declares
-it.
+A field name must be a valid path segment: one or more ASCII letters, digits,
+`_` or `-`. Cyoda rejects any other name with `400 VALIDATION_FAILED`, and the
+message names the key and the object that declares it. Rejected characters
+include spaces, dots, quotes, brackets, `$`, `@`, `:`, the metacharacters
+`*`, `?`, `#`, `|`, `!` and `\`, and any non-ASCII character. An empty name is
+also rejected.
 
-The reason is queryability. Search addresses a field through a `jsonPath` built
-from exactly this charset and offers no escape hatch, so a field named `a.b`
-could be written and then never found — worse, `$.a.b` would resolve as a
-nested `a` → `b` instead. It is refused at the door.
+Search addresses a field through a `jsonPath` built from this charset, and
+there is no escape form. A name outside the charset is therefore not
+searchable. For example, `$.a.b` addresses a nested `a` → `b`, not a field
+called `a.b`.
 
-This applies to both paths that establish a model's field set: sample-data
-import, and the change-level-driven extension an entity write performs. Strict
-validation (a model with no change level, and `PATCH`) establishes no fields,
-so the rule does not apply there. A model that already carries a non-conforming
-field is **not migrated** and there is no compatibility path: rename the key in
-the source data and re-establish the model.
+The rule applies to the two paths that establish the field set of a model:
+sample-data import, and the change-level extension that an entity write
+performs. It does not apply to strict validation, which is a model with no
+change level, and `PATCH`. Strict validation establishes no fields.
+
+Cyoda does not migrate a model that already carries a non-conforming field, and
+there is no compatibility mode. Rename the key in the source data and establish
+the model again.
 
 ## Evolving a model
 
@@ -170,22 +179,25 @@ The four levels are hierarchical, most restrictive first:
 | `TYPE` | An existing field's declared types may widen. |
 | `STRUCTURAL` | New fields, and giving a path a kind it does not yet declare. |
 
-`ARRAY_LENGTH` reads oddly now that an array's length is not part of the model,
-and that is the point: it is the level that permits nothing, and a longer array
-is held there exactly as it is at every other level.
+`ARRAY_LENGTH` permits no schema change. An array of any length is admissible
+at this level, as it is at every other level.
 
-Two rules decide which level a write needs. Giving a path a **kind** it does
-not declare — an object into a field declared `STRING` — is a `STRUCTURAL`
-change. Giving it a **value** no declared type admits is a `TYPE` change. A
-path that declares no kind at all is the exception worth knowing: a field
-observed only as `null`, or an array observed with no content, has nothing to
-conflict with, so it learns its first kind at `TYPE` (or `ARRAY_ELEMENTS` for
-an array's element) rather than at `STRUCTURAL`.
+Two rules decide which level a write needs:
 
-This governs data returned by a **workflow processor** exactly as it governs
-data sent by a client. A processor that writes a field the model does not
-declare needs the change level set, or the transition fails with
-`WORKFLOW_FAILED` and rolls back.
+- A write that gives a path a **kind** it does not declare is a `STRUCTURAL`
+  change. An object written into a field declared `STRING` is an example.
+- A write that gives a path a **value** that no declared type admits is a
+  `TYPE` change.
+
+There is one exception. A path that declares no kind has nothing to conflict
+with. A field observed only as `null`, or an array observed with no content,
+learns its first kind at `TYPE`. For the element of an array, it learns its
+first kind at `ARRAY_ELEMENTS`.
+
+The change level governs data returned by a **workflow processor** in the same
+way as data sent by a client. A processor that writes a field that the model
+does not declare needs the change level set. If the level does not permit the
+change, the transition fails with `WORKFLOW_FAILED` and rolls back.
 
 Things to plan explicitly:
 
@@ -199,21 +211,19 @@ Things to plan explicitly:
   field, you cannot narrow it to `INTEGER` within the same version.
   To narrow, introduce a new `modelVersion` with the stricter type
   and migrate the data.
-- **Unspellable field names.** A key outside the addressable charset is
-  rejected on the way in and never establishes a field, so plan renames in the
-  source data rather than expecting a migration.
+- **Field names outside the addressable charset.** Cyoda rejects such a key on
+  the way in, and the key never establishes a field. Plan the rename in the
+  source data. Cyoda provides no migration.
 
 ## Who validates what
 
 Cyoda validates **structure** and **types** against the model: the kinds each
 field declares, the types its scalars declare, and the shape of nested objects
-and array elements. That is free; you do not write those validators.
+and array elements. You do not write those validators.
 
-It also refuses a payload that is valid JSON but not storable, on every backend
-and both transports: a NUL character, unpaired UTF-16 surrogates or invalid
-UTF-8, a name repeated within one object, trailing content after the JSON
-value, and a number outside PostgreSQL's `numeric` range. Each of these used to
-be accepted by some backends and rejected by others.
+Cyoda also refuses a payload that is valid JSON but not storable. This applies
+on every backend and on both transports. See
+[what the platform will not store](/build/working-with-entities/#what-the-platform-will-not-store).
 
 Your application is responsible for **semantic** validation that lives inside
 transitions: "the order total must equal the sum of line items", "the
