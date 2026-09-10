@@ -1,0 +1,299 @@
+---
+// src/components/SequenceFlow.astro — swimlane sequence diagram.
+//
+// Replaces a mermaid sequenceDiagram. The messages are authored as an
+// ordered list in the page markdown, each item leading with its actor pair
+// in bold:
+//
+//   1. **User → OIDC Provider** Login with browser
+//
+// The component renders its own slot to HTML, parses those items back out,
+// and lays them into lanes: one column per actor in order of first
+// appearance, a lifeline down each column, and one arrow row per message
+// spanning from the sender's lane to the receiver's lane.
+//
+// Reading the slot rather than taking a `messages` prop keeps the markdown
+// as the single source of truth, so the page still exports cleanly to
+// dist/markdown/ and stays in the Pagefind index. A props-based component
+// would be a self-closing tag, which the markdown exporter passes through
+// verbatim as raw JSX.
+//
+// Arrows are all drawn the same. Mermaid distinguished responses with a
+// dashed line; direction and wording carry that here instead.
+interface Props {
+  /** Accessible name for the exchange as a whole. */
+  label: string;
+}
+const { label } = Astro.props;
+
+const rendered = await Astro.slots.render('default');
+
+const items = [...rendered.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
+if (items.length === 0) {
+  throw new Error(
+    `SequenceFlow ("${label}"): expected an ordered list of messages in the slot, found none.`
+  );
+}
+
+const stripTags = (s: string) => s.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+
+const actors: string[] = [];
+const messages = items.map((item, i) => {
+  const parsed = item.match(/^\s*<strong>([\s\S]*?)<\/strong>([\s\S]*)$/);
+  if (!parsed) {
+    throw new Error(
+      `SequenceFlow ("${label}"): message ${i + 1} must start with a bold actor pair, ` +
+        `e.g. "**User → OIDC Provider** Login with browser". Got: ${stripTags(item)}`
+    );
+  }
+  const pair = stripTags(parsed[1]).split(/\s*(?:→|->)\s*/);
+  if (pair.length !== 2 || !pair[0] || !pair[1]) {
+    throw new Error(
+      `SequenceFlow ("${label}"): message ${i + 1} needs exactly one "→" between two actors. ` +
+        `Got: ${stripTags(parsed[1])}`
+    );
+  }
+  const [from, to] = pair;
+  if (from === to) {
+    throw new Error(
+      `SequenceFlow ("${label}"): message ${i + 1} sends "${from}" to itself. ` +
+        `Self-messages have no lane to span and are not supported.`
+    );
+  }
+  for (const actor of [from, to]) {
+    if (!actors.includes(actor)) actors.push(actor);
+  }
+  return { from, to, body: parsed[2].trim() };
+});
+
+// The message grid is laid out in half-lanes: 2 columns per actor. That puts
+// a grid line exactly on each lane's centre, so an arrow spanning line 2i+2
+// to 2j+2 runs centre-to-centre with no percentage padding to get wrong.
+const laid = messages.map((m) => {
+  const from = actors.indexOf(m.from);
+  const to = actors.indexOf(m.to);
+  return {
+    ...m,
+    start: 2 * Math.min(from, to) + 2,
+    end: 2 * Math.max(from, to) + 2,
+    dir: to > from ? 'ltr' : 'rtl',
+  };
+});
+---
+<div
+  class="seq-flow"
+  role="group"
+  aria-label={label}
+  style={`--seq-cols:${actors.length};--seq-halves:${actors.length * 2}`}
+>
+  <div class="seq-flow__actors" aria-hidden="true">
+    {actors.map((actor) => <span class="seq-flow__actor">{actor}</span>)}
+  </div>
+
+  <div class="seq-flow__body">
+    <div class="seq-flow__lanes" aria-hidden="true">
+      {actors.map(() => <span class="seq-flow__lane"></span>)}
+    </div>
+
+    <ol class="seq-flow__messages">
+      {laid.map((m, i) => (
+        <li
+          class="seq-flow__message"
+          style={`grid-column:${m.start}/${m.end}`}
+        >
+          <span class="seq-flow__pair">{m.from} → {m.to}</span>
+          <span class="seq-flow__text">
+            <span class="seq-flow__num">{i + 1}</span>
+            <span set:html={m.body} />
+          </span>
+          <span class="seq-flow__arrow" data-dir={m.dir} aria-hidden="true"></span>
+        </li>
+      ))}
+    </ol>
+  </div>
+</div>
+
+<style>
+  .seq-flow {
+    padding: 1.25rem;
+    margin: 1.5rem 0;
+    background: hsl(var(--cyoda-teal) / 0.04);
+    border: 1px solid hsl(var(--cyoda-teal) / 0.2);
+    border-radius: 0.5rem;
+  }
+
+  .seq-flow__actors {
+    display: grid;
+    grid-template-columns: repeat(var(--seq-cols), 1fr);
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .seq-flow__actor {
+    padding: 0.35rem 0.5rem;
+    background: hsl(var(--cyoda-teal) / 0.12);
+    border: 1px solid hsl(var(--cyoda-teal) / 0.35);
+    border-radius: 0.3rem;
+    font-family: var(--cyoda-font-sans);
+    font-size: 0.85rem;
+    font-weight: 700;
+    line-height: 1.25;
+    text-align: center;
+    color: var(--sl-color-text-accent);
+  }
+
+  .seq-flow__body {
+    position: relative;
+  }
+
+  /* Lifelines, painted behind the message rows. */
+  .seq-flow__lanes {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: repeat(var(--seq-cols), 1fr);
+    pointer-events: none;
+  }
+
+  .seq-flow__lane {
+    position: relative;
+  }
+
+  .seq-flow__lane::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    background: hsl(var(--cyoda-teal) / 0.35);
+  }
+
+  /* Descendant selector, not a bare class: Starlight's `.sl-markdown-content
+   * ol` sets padding-inline-start, and Astro's scope hash carries no
+   * specificity of its own, so a single class would lose to it and shift
+   * every arrow half a lane to the right. */
+  .seq-flow .seq-flow__messages {
+    position: relative;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(var(--seq-halves), 1fr);
+    padding: 0;
+    margin: 0;
+  }
+
+  .seq-flow__message {
+    padding: 0.5rem 0 0.9rem;
+    margin: 0;
+    min-width: 0;
+    text-align: center;
+  }
+
+  .seq-flow__text {
+    display: inline-block;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: hsl(var(--cyoda-foreground) / 0.9);
+    /* Mask the lifelines behind the label only, not the whole row. The
+     * gradient re-creates the panel's own tinted surface, which a flat
+     * --cyoda-background would not match. */
+    background:
+      linear-gradient(hsl(var(--cyoda-teal) / 0.04), hsl(var(--cyoda-teal) / 0.04)),
+      hsl(var(--cyoda-background));
+    padding: 0 0.5rem 0.25rem;
+  }
+
+  .seq-flow__num {
+    font-family: var(--cyoda-font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--sl-color-text-accent);
+    margin-right: 0.35rem;
+  }
+
+  .seq-flow__arrow {
+    display: block;
+    position: relative;
+    height: 2px;
+    background: hsl(var(--cyoda-teal) / 0.8);
+  }
+
+  .seq-flow__arrow::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    width: 0;
+    height: 0;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+  }
+
+  .seq-flow__arrow[data-dir='ltr']::after {
+    right: 0;
+    border-left: 7px solid hsl(var(--cyoda-teal) / 0.8);
+  }
+
+  .seq-flow__arrow[data-dir='rtl']::after {
+    left: 0;
+    border-right: 7px solid hsl(var(--cyoda-teal) / 0.8);
+  }
+
+  /* The lanes carry the actor pair visually; keep it for screen readers. */
+  .seq-flow__pair {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .seq-flow :global(code) {
+    font-size: 0.9em;
+  }
+
+  /* Too narrow for lanes: fall back to stacked rows, one per message. */
+  @media (max-width: 640px) {
+    .seq-flow__actors,
+    .seq-flow__lanes,
+    .seq-flow__arrow {
+      display: none;
+    }
+
+    .seq-flow .seq-flow__messages {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .seq-flow__message {
+      grid-column: auto !important;
+      padding: 0.6rem 0.75rem;
+      background: hsl(var(--cyoda-background));
+      border: 1px solid hsl(var(--cyoda-border));
+      border-left: 3px solid hsl(var(--cyoda-teal) / 0.6);
+      border-radius: 0.35rem;
+      text-align: left;
+    }
+
+    .seq-flow__pair {
+      position: static;
+      display: block;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      clip-path: none;
+      font-family: var(--cyoda-font-sans);
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--sl-color-text-accent);
+      margin-bottom: 0.1rem;
+    }
+
+    .seq-flow__text {
+      display: block;
+      background: none;
+      padding: 0;
+    }
+  }
+</style>

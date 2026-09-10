@@ -1,0 +1,96 @@
+---
+// src/components/StepFlow.astro — vertical connected stepper.
+//
+// Wraps an ordered list authored in the page markdown. Each <li> becomes a
+// numbered circle on a shared vertical rail, with the step text beside it.
+// The list stays real markdown so it survives the dist/markdown/ export and
+// is indexed by Pagefind — neither was true of the build-time SVG this
+// replaces.
+//
+// The rail is drawn per-item (a segment from each circle down to the next)
+// rather than as one element behind the list, so it needs no height
+// measurement and cannot drift when text wraps. The last item drops its
+// segment via :last-child.
+interface Props {
+  /** Accessible name for the flow as a whole. */
+  label: string;
+}
+const { label } = Astro.props;
+---
+<div class="step-flow" role="group" aria-label={label}>
+  <slot />
+</div>
+
+<style>
+  .step-flow {
+    padding: 1.5rem 1.25rem;
+    margin: 1.5rem 0;
+    background: hsl(var(--cyoda-teal) / 0.04);
+    border: 1px solid hsl(var(--cyoda-teal) / 0.2);
+    border-radius: 0.5rem;
+  }
+
+  .step-flow :global(ol) {
+    list-style: none;
+    counter-reset: step-flow;
+    padding: 0;
+    margin: 0;
+  }
+
+  .step-flow :global(ol > li) {
+    counter-increment: step-flow;
+    position: relative;
+    /* Room for the 1.9rem circle plus its gutter. */
+    padding: 0 0 1.35rem 3rem;
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.45;
+    color: hsl(var(--cyoda-foreground) / 0.9);
+  }
+
+  .step-flow :global(ol > li:last-child) {
+    padding-bottom: 0;
+  }
+
+  /* Numbered circle. */
+  .step-flow :global(ol > li)::before {
+    content: counter(step-flow);
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.9rem;
+    height: 1.9rem;
+    border-radius: 9999px;
+    font-family: var(--cyoda-font-sans);
+    font-size: 0.95rem;
+    font-weight: 700;
+    background: hsl(var(--cyoda-teal));
+    color: white;
+  }
+
+  /* Rail segment from this circle down to the next one. */
+  .step-flow :global(ol > li)::after {
+    content: '';
+    position: absolute;
+    top: 1.9rem;
+    left: calc(0.95rem - 1px);
+    width: 2px;
+    bottom: 0;
+    background: hsl(var(--cyoda-teal) / 0.35);
+  }
+
+  .step-flow :global(ol > li:last-child)::after {
+    display: none;
+  }
+
+  .step-flow :global(strong) {
+    color: hsl(var(--cyoda-foreground));
+  }
+
+  .step-flow :global(code) {
+    font-size: 0.9em;
+  }
+</style>

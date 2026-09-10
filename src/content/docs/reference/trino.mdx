@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import VendoredBanner from '../../../components/VendoredBanner.astro';
+import EntityTree from '../../../components/EntityTree.astro';
 
 <VendoredBanner stability="upcoming" />
 
@@ -125,33 +126,22 @@ Here is a visual representation of the node structure for the example
 above, where the corresponding SQL tables are labelled ORGANIZATION,
 CLIENTS, and METRICS:
 
-```mermaid
-graph TD
-    %% STYLES
-    classDef highlighted fill:none,stroke:#5A18AC,stroke-width:3px,rx:8,ry:8
-    classDef normal fill:#F5FAF9,stroke:#4FB8B0,stroke-width:2px,rx:8,ry:8
+<EntityTree
+  label="Node tree for the example document"
+  tableLegend="marks a node that is projected into its own SQL table.">
 
-    %% Root Node
-    A["$(root node -> ORGANIZATION)"] --> B["organization"]
-    A --> K["quarterly_metrics[][] (detached 2D array node -> METRICS)"]
+- **`$` (root node → ORGANIZATION)**
+  - `organization`
+    - `organization.name`
+    - `organization.address[]`
+    - **`organization.clients[]` (clients node → CLIENTS)**
+      - `organization.clients[].name`
+      - `organization.clients[].address[]`
+  - **`quarterly_metrics[][]` (detached 2D array node → METRICS)**
+    - `quarterly_metrics[*]` (outer arrays)
+      - `quarterly_metrics[*][*]` (individual cell values)
 
-    %% Organization branch
-    B --> C["organization.name"]
-    B --> D["organization.address[]"]
-    B --> E["organization.clients[] (clients node -> CLIENTS)"]
-
-    %% Clients branch
-    E --> F["organization.clients[].name"]
-    E --> G["organization.clients[].address[]"]
-
-    %% Quarterly metrics branch
-    K --> L["quarterly_metrics[*] (outer arrays)"]
-    L --> M["quarterly_metrics[*][*] (individual cell values)"]
-
-    %% Apply highlighting to specific nodes
-    class A,K,E highlighted
-    class B,C,D,F,G,L,M normal
-```
+</EntityTree>
 
 ### Embedded arrays and detached arrays
 

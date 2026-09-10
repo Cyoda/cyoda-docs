@@ -1,6 +1,5 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
-import rehypeMermaid from 'rehype-mermaid';
 import cookieconsent from '@jop-software/astro-cookieconsent';
 import react from '@astrojs/react';
 import dotenv from 'dotenv';
@@ -51,15 +50,6 @@ export default defineConfig({
 		css: {
 			devSourcemap: false
 		}
-	},
-	markdown: {
-		rehypePlugins: [
-			[rehypeMermaid, {
-				strategy: 'img-svg',
-				dark: true,
-				colorScheme: 'default'
-			}]
-		]
 	},
 	redirects: {
 		'/getting-started/introduction/': '/concepts/what-is-cyoda/',
