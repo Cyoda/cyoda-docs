@@ -88,7 +88,8 @@ curl -X POST 'http://localhost:8080/api/search/direct/orders/1?limit=200' \
 
 The path is `/api/search/direct/{entityName}/{modelVersion}`, and the request
 body is the condition document itself — there is no wrapper object. `limit`,
-`pointInTime` and `trackingRead` are **query parameters**, not body fields.
+`pointInTime`, `trackingRead`, `timeoutMillis` and `sort` are **query
+parameters**, not body fields.
 
 The response is `application/x-ndjson`: one complete entity envelope per line,
 each carrying `data` plus a `meta` block with the id, model key, state, and
@@ -142,6 +143,58 @@ Async search never returns `SEARCH_RESULT_LIMIT`: it snapshots the whole
 matched set and pages over it. An out-of-range `pageSize` or `pageNumber` is a
 plain `400 BAD_REQUEST`.
 
+The server translates the condition **before** it stores the job. A condition
+that no backend can execute is refused at submission. The server then streams
+the results to storage as the scan runs.
+
+### Admission and backpressure
+
+A fixed worker pool serves the submissions. When the workers and the submit
+queue are both full, submission fails with a retryable
+**`503 SEARCH_QUEUE_FULL`**.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CYODA_SEARCH_ASYNC_WORKERS` | `8` | Jobs that execute at the same time on this node |
+| `CYODA_SEARCH_ASYNC_QUEUE` | `256` | Submissions that wait for a worker |
+| `CYODA_SEARCH_ASYNC_MAX_PER_TENANT` | `8` | One tenant's share of queued **and** running jobs |
+
+<Aside type="caution" title="The per-tenant cap applies to a single-tenant deployment">
+
+On a single-tenant deployment the in-flight ceiling is **8**, not
+`workers + queue` (264). If you submit 50 jobs at once, the server accepts 8
+and answers `503 SEARCH_QUEUE_FULL` for 42.
+
+Raise the value, or set `0` to serve submissions first-come-first-served.
+
+</Aside>
+
+### Recovery after the loss of a node
+
+A running job records its liveness every
+`CYODA_SEARCH_JOB_HEARTBEAT_INTERVAL` (default `15s`). It starts to do this at
+submission, not at the start of the scan.
+
+If the owning node stops before the job reaches a terminal status, a reaper
+takes over. The reaper claims the job when the heartbeat has been silent for
+`CYODA_SEARCH_JOB_STALE_AFTER` (default `5m`). It deletes the partial results
+of the lost executor. It then runs the job again on a live node, at the
+`pointInTime` stored with the job. The client sees a longer `RUNNING` period,
+and the job ends `SUCCESSFUL`.
+
+A reaped executor that recovers cannot write to a result set that another node
+has taken over.
+
+A job ends `FAILED` in three cases:
+
+- The search itself failed.
+- The job lost its executor `CYODA_SEARCH_JOB_MAX_ATTEMPTS` times (default `3`).
+- The model's schema became unreadable between submission and execution.
+
+A graceful shutdown releases its in-flight jobs immediately for reclaim. A
+released claim does not count against the attempt cap, so a rolling restart of
+any length is safe.
+
 ### Cancelling a job
 
 If a job is no longer needed — the user navigated away, a replacement
@@ -153,8 +206,13 @@ curl -X PUT http://localhost:8080/api/search/async/{jobId}/cancel \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Cancellation is cooperative: in-flight work is stopped at the next safe
-point and any partial results for that `jobId` are discarded.
+Cancellation is cooperative. The server stops the work at the next safe point
+and deletes any partial results for that `jobId`.
+
+Cancellation succeeds only while the job is `RUNNING`. A job that is already
+`SUCCESSFUL`, `FAILED` or `CANCELLED` returns
+`400 SEARCH_JOB_ALREADY_TERMINAL`, with `currentStatus` and `snapshotId` in the
+response properties.
 
 ## The condition DSL
 
@@ -178,8 +236,9 @@ so what you learn here transfers directly.
   "operatorType": "EQUALS", "value": "submitted" }
 ```
 
-**`group`** — combine conditions. `operator` is `AND` or `OR`; these are the
-only two, and `NOT` is not supported. Groups nest to a maximum depth of 50:
+**`group`** — combine conditions. `operator` is `AND`, `OR` or `NOT`,
+case-sensitive; anything else is `400 INVALID_CONDITION`. Groups nest to a
+maximum depth of 50:
 
 ```json
 {
@@ -192,45 +251,27 @@ only two, and `NOT` is not supported. Groups nest to a maximum depth of 50:
 }
 ```
 
-**`array`** — match positional values in a JSON array, where `null` matches any
-value at that index:
+**`array`** — match positional values in a JSON array. The path addresses the
+array's **elements**, so it must carry a trailing `[*]`; a bare path is
+`400 INVALID_FIELD_PATH`. A `null` entry tests nothing at that index:
 
 ```json
-{ "type": "array", "jsonPath": "$.laureates",
+{ "type": "array", "jsonPath": "$.laureates[*]",
   "values": ["John", null, "Hopfield"] }
 ```
 
-**`function`** — delegate the predicate to a compute node. The condition is
-dispatched as an `EntityCriteriaCalculationRequest`, exactly like a workflow
-criterion:
+Each non-null entry is a positional test, and the server combines the tests
+with `AND`. The example matches when element 0 equals `"John"` **and** element
+2 equals `"Hopfield"`. A `values` array of only `null` entries matches every
+entity.
 
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "my-criteria-fn",
-    "config": {
-      "calculationNodesTags": "approval-service",
-      "attachEntity": true,
-      "responseTimeoutMs": 30000
-    }
-  }
-}
-```
-
-`function.name` and `config.calculationNodesTags` are required for routing;
-`attachEntity` defaults to `true` and `responseTimeoutMs` to `30000`.
-
-<Aside type="caution" title="A function condition cannot be pushed down">
-
-`function` is the one condition type that never translates to a storage-plugin
-filter. It always runs as a **post-filter with in-memory entity loading**, so
-every candidate entity is materialised and dispatched to your compute node.
-Combine it with a selective `simple` or `lifecycle` condition in an `AND` group
-so the pushdown narrows the population first — a bare `function` condition over
-a large model means one callout per entity.
-
-</Aside>
+**`function`** — delegate the predicate to a compute node. This clause is
+**criteria-only**. Criteria and search share one condition DSL, but search does
+not accept a `function` clause. The server rejects a `function` clause at any
+depth in a search, async-search, grouped-statistics or conditional-delete body
+with `400 INVALID_CONDITION`. See
+[workflows and processors](/build/workflows-and-processors/) for its use as a
+transition criterion.
 
 `operatorType` also accepts the spellings `operator` and `operation`. The
 available operators are:
@@ -244,10 +285,12 @@ available operators are:
 | Case-insensitive | `IEQUALS`, `INOT_EQUAL`, `ICONTAINS`, `INOT_CONTAINS`, `ISTARTS_WITH`, `INOT_STARTS_WITH`, `IENDS_WITH`, `INOT_ENDS_WITH` |
 | Pattern | `LIKE` (anchored glob), `MATCHES_PATTERN` (anchored RE2 regex) |
 
-An operator outside this list is rejected with `400 BAD_REQUEST`, and the
-error detail includes the canonical list. `IS_CHANGED` and `IS_UNCHANGED` are
-change-generation operators, not search predicates — cyoda-go does not
-implement them.
+The server rejects an operator outside this list, and a missing `operatorType`,
+with `400 INVALID_CONDITION`. The error detail lists the valid operators. Every
+surface that carries a condition uses this code, including workflow import.
+
+`IS_CHANGED` and `IS_UNCHANGED` are change-generation operators, not search
+predicates. cyoda-go does not implement them.
 
 <Aside type="tip" title="Matching everything">
 
@@ -264,6 +307,106 @@ is `false`.
 
 </Aside>
 
+## How a field path is written
+
+A `jsonPath` is JSON Path. The server checks it at the API boundary, before
+anything executes. One scanner enforces this grammar for search conditions,
+workflow criteria, `groupBy` and aggregation fields. A
+[sort key](#sorting-results) uses the same segment charset, with one
+difference: its `$.` leader is optional.
+
+```
+jsonPath  = "$." segment ( "." segment )*
+segment   = name subscript*
+name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the index must fit an int32
+```
+
+The `$.` leader is **required**. A bare `amount` is not a path, and it is not
+an alias for `$.amount`. The server rejects these paths with
+`400 INVALID_FIELD_PATH`:
+
+- A bare name, such as `amount`.
+- An empty path.
+- An empty or trailing segment, such as `$..a` or `$.a.`.
+- Bracket-quoted property access, such as `$['x']` or `$.a["b"]`. Write `$.x`.
+- Any character outside the segment set.
+
+**The syntax of a path decides what the path addresses.**
+
+| Path | Addresses | On `{"tags": []}` |
+|---|---|---|
+| `$.tags` | The array itself | `NOT_NULL` is true |
+| `$.tags[*]` | Every element | `IS_NULL` and `NOT_NULL` are both false |
+| `$.tags[0]` | One position | `IS_NULL` is true |
+
+A leaf on `$.tags[*]` is true when **some** element satisfies it. For example,
+`$.tags[*] EQUALS "red"` selects the entities whose `tags` contains `"red"`.
+
+Write one `[*]` for each array level, as in `$.matrix[*][*]` and
+`$.orders[*].lines[*].sku`. A trailing `[*]` over an array of objects under a
+scalar operator is `400 INVALID_FIELD_PATH`. The element has no scalar form, so
+address the leaf instead: write `$.items[*].sku`, not `$.items[*]`.
+
+The server rejects every other bracket form with `400 INVALID_FIELD_PATH`:
+unclosed or unmatched (`$.a[`, `$.a]`), no field name before it (`$.[0]`),
+empty (`$.a[]`), negative or signed (`$.a[-1]`), a slice (`$.a[0:2]`), a union
+(`$.a[0,1]`), a filter expression (`$.a[?(@.x)]`), whitespace inside
+(`$.a[ 0]`), or an index too large for a signed 32-bit integer. The server
+scans the full path, so it also rejects text after a valid subscript, such as
+`$.a[0]b` or `$.a[0];DROP`.
+
+**A field declared in more than one kind stays searchable through each kind.**
+The server accepts a path that is valid for at least one declared branch. For
+each entity, the predicate applies to the branch that the entity's data uses.
+An entity on a different branch does not match. It is not an error.
+
+For a field declared as both string and array-of-string, `$.a EQUALS "A"`
+selects the scalar-shaped entities. `$.a[*] EQUALS "A"` selects the
+array-shaped entities. The server accepts both conditions.
+
+This grammar does not apply to lifecycle metadata. A `lifecycle` condition
+names a meta field directly.
+
+## Negation with `NOT`
+
+`NOT` inverts the answer of its child condition. `NOT(c)` is true when `c` is
+false.
+
+`NOT` takes **exactly one** child condition. Zero children, or two or more, is
+`400 INVALID_CONDITION`. To negate a group, nest the group inside the `NOT`:
+
+```json
+{
+  "type": "group",
+  "operator": "NOT",
+  "conditions": [
+    { "type": "simple", "jsonPath": "$.tags[*]", "operatorType": "EQUALS", "value": "red" }
+  ]
+}
+```
+
+- **Over a wildcard path, `NOT` is a universal quantifier.** The leaf beneath
+  it stays existential. `NOT($.tags[*] EQUALS "red")` matches when **no**
+  element equals `"red"`. `$.tags[*] NOT_EQUAL "red"` matches when **some**
+  element is different. For `{"tags": ["red", "blue"]}` the first is false and
+  the second is true.
+- **`NOT` matches an empty list, an explicit `null` and an absent field.** The
+  wrapped leaf is false in all three states. On an entity with no `x`,
+  `NOT($.x EQUALS "A")` matches. Both `$.x EQUALS "A"` and `$.x NOT_EQUAL "A"`
+  do not match.
+- **The server does not apply De Morgan's laws to `NOT`.** `NOT(EQUALS)` is not
+  `NOT_EQUAL`. `NOT(IS_NULL)` is not `NOT_NULL`. The server does not distribute
+  a `NOT` group over its children.
+
+There is no "every element" operator, and `NOT` does not build one. On
+`{"tags": ["red", null]}`, `NOT($.tags[*] NOT_EQUAL "red")` looks like "every
+tag is red", and it matches: the leaf is false at the `null` element, so the
+`NOT` is true. A `null` element makes any such construction report success.
+
+`NOT` is residual-only. No backend pushes a `NOT` into its own query language.
+The in-process kernel evaluates it.
+
 ## Predicate semantics
 
 Search and workflow criteria run on **one shared evaluation kernel**, so a
@@ -276,17 +419,44 @@ against the field's declared type(s), so the JSON number `30` and the string
 operand that parses only as a number never matches a string-stored value.
 Numbers compare at arbitrary precision, so values beyond 2^53 are exact.
 
+**An operator that can never be satisfied still answers.** The server accepts
+an operand that parses into at least one declared type, then compares it
+against each stored-value type family. Where no stored value of that type can
+equal the operand, a **positive** operator answers non-match and a **negative**
+operator answers match.
+
+For example, `$.n NOT_EQUAL 12.5` on a field declared `INTEGER` returns every
+entity that holds a number at `n`, because no integer equals `12.5`. Take care
+with a negative operator in a conditional delete: it selects this wider set.
+
 **Absent and null fields never match a binary operator — including
 negatives.** `NOT_EQUAL`, `NOT_CONTAINS`, `INOT_*` and the rest are
 null-guarded to non-match rather than evaluated as `!positive`. A missing field
 does not satisfy `NOT_EQUAL` just because it fails `EQUALS`. Use `IS_NULL` and
-`NOT_NULL` to test presence — they are the only operators that do.
+`NOT_NULL` to test presence — they are the only operators that do. `NOT` is not
+a binary operator, so this guard does not apply to it. See
+[negation](#negation-with-not).
 
-**`LIKE` is a real anchored glob.** `%` matches any run of characters, `_`
-matches exactly one, and `\` escapes a literal `%`, `_` or `\`. The match is
-whole-string and case-sensitive. `MATCHES_PATTERN` is a whole-string-anchored
-RE2 regex; RE2 diverges from Java's dialect on constructs such as
-backreferences and some lookaround.
+**`LIKE` is a glob.** The server matches the operand directly. It does not
+translate the operand into a regular expression, so a regex metacharacter has
+no special meaning. Three characters are special:
+
+| Character | Matches |
+|---|---|
+| `%` | Any sequence of characters, including an empty sequence and a newline |
+| `_` | Exactly one character (one UTF-8 rune), including a newline |
+| `\` | Escapes the next character to its literal form |
+
+So `\d` matches the letter `d`, and `\\` matches one backslash. The match is
+whole-string anchored and case-sensitive. Wildcards match rune by rune, and the
+server compares every other character byte by byte. A pattern that ends with an
+unpaired `\` is rejected. To match a literal backslash at the end, write
+`\\`.
+
+`MATCHES_PATTERN` is a whole-string-anchored RE2 regular expression. RE2 is
+different from the Java dialect for some constructs, such as backreferences and
+some lookaround. The operand must parse on its own, and it must also compile
+when the server anchors it.
 
 **Temporal fields compare chronologically**, not lexically, across
 `LOCAL_DATE`, `LOCAL_DATE_TIME`, `LOCAL_TIME`, `ZONED_DATE_TIME`, `YEAR` and
@@ -297,38 +467,31 @@ full timestamp.
 **Validation is parse-based**, evaluated against the target model:
 
 - `400 CONDITION_TYPE_MISMATCH` — the operand parses into none of the field's
-  declared types. Comparison and range operators only; string operators and
-  presence tests carry no operand-type constraint.
-- `400 INVALID_FIELD_PATH` — the path is unknown to the model, or it names a
-  pure container (an object) and you used a scalar operator. Navigate to a
-  scalar leaf instead. A path seen as *both* an object and a scalar across
-  entities stays searchable via its scalar type. `IS_NULL`/`NOT_NULL` are
-  exempt, since they test presence rather than a value.
-- `400 INVALID_CONDITION` — a `null` operand on a binary or range operator, a
-  range operand that is not a two-element array, or an object operand.
+  declared types. Comparison and range operators only; string and pattern
+  operators and presence tests carry no operand-type constraint.
+- `400 INVALID_FIELD_PATH` — the path is outside the
+  [grammar](#how-a-field-path-is-written), is unknown to the model, or names a
+  container with no scalar form: a bare object path, or a `[*]` path over an
+  array whose elements are only ever objects. Navigate to a scalar leaf
+  instead. A path declared in more than one kind stays searchable through its
+  scalar kind — see [how a field path is written](#how-a-field-path-is-written).
+  `IS_NULL`/`NOT_NULL` are exempt from the container rejection, since they test
+  presence rather than a value.
+- `400 INVALID_CONDITION` — a structural or shape failure rather than a path or
+  type one: an unknown or missing `operatorType`, a `null`, object or complex
+  operand on a binary or range operator, a range operand that is not a
+  two-element array, a malformed `LIKE`/`MATCHES_PATTERN` operand, a string or
+  pattern operator on a temporal meta field, an `array` clause on a bare path,
+  or a `function` clause at any depth.
+- `500` — the server could not load or parse the model's schema, so it could
+  not check the condition against the schema. The response carries a ticket id
+  and no result set. A condition that contains only `lifecycle` clauses needs
+  no schema, and the server answers it normally.
 
-There is no operator-versus-type rejection: `CONTAINS` on a numeric field is a
-valid request that simply evaluates to a non-match.
-
-<Aside type="caution" title="Your existing queries may return different results">
-
-cyoda-go v0.8.3 converged two predicate evaluators that had drifted apart, so
-the same query could previously return different results depending on which
-one ran. Aligning them changed observable behaviour:
-
-- cross-type coincidental matches no longer occur;
-- negatives no longer match null or absent fields;
-- `LIKE` is a real glob on every backend, where SQL backends previously
-  neutered the wildcards;
-- `BETWEEN_INCLUSIVE` performs an inclusive range check, where
-  `Searcher`-backed stores previously fell through to a regex evaluation;
-- validation is parse-based, so some queries that used to fail now succeed,
-  and some that used to pass are now rejected.
-
-Re-check any query whose correctness you depend on, particularly negations and
-`LIKE` patterns.
-
-</Aside>
+There is no operator-versus-type rejection on a data path. `CONTAINS` against a
+numeric field is a valid request, and it evaluates to a non-match. The
+exception is the two temporal meta fields. A string or pattern operator on
+`creationDate` or `lastUpdateTime` is `400 INVALID_CONDITION`.
 
 ## Historical reads with `pointInTime`
 
@@ -371,7 +534,18 @@ Both search endpoints (direct and async) accept sort keys. Over HTTP, add one or
 POST /api/search/direct/orders/1?sort=@state&sort=amount:desc
 ```
 
-Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`. Meta date fields order chronologically; temporal *data* paths are ordered as text, which for ISO-8601 values coincides with chronological order. Note that this is the **sort** contract — predicate *comparison* uses the arbitrary-precision, type-directed rules described under [predicate semantics](#predicate-semantics). Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`, as is exceeding the sort-key cap set by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)). Over gRPC the same capability is expressed as a structured `orderBy` array.
+Ordering is **canonical across every backend**: text by byte order, numeric by IEEE-754 double, bool as `false < true`. Meta date fields order chronologically; temporal *data* paths are ordered as text, which for ISO-8601 values coincides with chronological order. Note that this is the **sort** contract — predicate *comparison* uses the arbitrary-precision, type-directed rules described under [predicate semantics](#predicate-semantics). Absent or null values sort last, and the entity id is always the final tiebreaker. An unsortable, array, or unknown path is rejected with `400 INVALID_FIELD_PATH`, as is exceeding the sort-key cap set by `CYODA_SEARCH_MAX_SORT_KEYS` (default `16`; see the [configuration reference](/reference/configuration/#vars-search)).
+
+A sort key is a scalar path over the same segment charset as a condition path,
+with one difference: the `$.` leader is optional. `$.year:desc` and `year:desc`
+are the same key.
+
+The server rejects an array subscript or projection, such as `$.items[*].name`
+or `$.items[0].name`, with `400 INVALID_FIELD_PATH`. An ordering needs one
+scalar value per entity.
+
+Over gRPC the same capability is a structured `orderBy` array, over the same
+grammar and the same resolver.
 
 <Aside type="caution" title="Ordered top-N belongs on the async path">
 
@@ -414,6 +588,37 @@ after the snapshot was taken is not detected either way. The flag is ignored
 outside a transaction, and async search does not expose it at all, since it
 runs detached.
 
+## Bounding a search
+
+The server translates every condition into a backend query. A condition it
+cannot translate is `400 INVALID_CONDITION`, or `400 INVALID_FIELD_PATH` for a
+path failure. The same rule applies to search, conditional delete and grouped
+statistics, so all three answer a given condition the same way.
+
+No backend meters the rows a search examines, and the server sets no time
+budget. It bounds search *results*, not search *time*. A direct search is
+bounded-or-fail on `limit`. An async search bounds neither duration nor result
+count. Two controls bound the time:
+
+- `timeoutMillis` on a direct search.
+- Cancellation on an async job.
+
+If you supply neither, the search is unbounded. The one server-side exception
+is an operator-configured ceiling on the async scan,
+`CYODA_POSTGRES_SEARCH_STATEMENT_TIMEOUT`.
+
+```
+POST /api/search/direct/orders/1?timeoutMillis=5000
+```
+
+`timeoutMillis` has no default. When the time elapses, the server stops the
+search and fails the request with `408 SEARCH_TIMEOUT`. It returns **no partial
+results**.
+
+The server rejects `timeoutMillis` with `400 BAD_REQUEST` on a non-positive
+value, and on a request that
+[joins an open transaction](/build/client-compute-nodes/#1031-transaction-joined-callbacks).
+
 ## Performance notes
 
 - Scope by `state` or a high-selectivity field first — the workflow
@@ -425,9 +630,9 @@ runs detached.
 - Avoid open-ended `pointInTime` scans across every revision — anchor
   the query at a specific timestamp or a short window.
 - On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
-- Pushdown is a **narrowing optimization only** — the in-process kernel remains authoritative for every match decision, so results never diverge between backends. Pushdown applies inside transactions too, so an in-transaction search no longer degrades into a full `GetAll` scan.
+- Pushdown is a **narrowing optimization only** — the in-process kernel remains authoritative for every match decision, so results never diverge between backends. Pushdown applies inside transactions too, so an in-transaction search does not degrade into a full-model scan.
 - Boolean conditions on PostgreSQL are pushed down correctly as of v0.8.3. Previously an `EQUALS`/`NOT_EQUAL` against a boolean field returned `500`, because the planner bound a raw Go `bool` against a text-typed JSON extraction that the driver cannot encode.
-- A condition the plugin cannot translate falls back to in-memory filtering after a full scan. If that residual scan examines more rows than the backend's budget allows, it fails with `400 SCAN_BUDGET_EXHAUSTED` — narrow the query or add an indexable predicate rather than retrying.
+- A `NOT`, and a wildcard path under a scalar operator, are residual. The kernel re-checks them as candidate rows stream. Put a selective pushable predicate in the same `AND` group to narrow the population first.
 
 ## Grouped statistics
 
@@ -466,7 +671,7 @@ The request has four parts:
 - **`groupBy`** (required) — an ordered list of dimensions. Each entry is
   either the literal `state` (the workflow state) or a `$.`-prefixed
   JSONPath into the entity payload. The result `groupKey` is ordered to
-  match.
+  match. Duplicate entries are `400 DUPLICATE_GROUP_BY`.
 - **`aggregations`** (optional) — per-group numeric aggregates. Each is
   `{ "op", "field", "as" }` where `op` is one of `sum`, `avg`, `min`,
   `max`, `stdev`, `field` is a JSONPath, and `as` is an optional alias
@@ -494,6 +699,18 @@ The response is one bucket per group:
 
 Aggregation values are numeric, or `null` when a group has no eligible
 inputs.
+
+Both `groupBy` and an aggregation `field` follow the same
+[path grammar](#how-a-field-path-is-written) as a search condition, but they do
+not accept array subscripts. A group key must be a single scalar. The server
+rejects `$.items[*]` and `$.items[0]` with `400 INVALID_GROUP_BY_PATH` for a
+`groupBy` entry, or `400 INVALID_AGGREGATION_FIELD` for an aggregation.
+
+There is also no dotted form for an array position. `$.items.0` names a field
+called `0`, not an element.
+
+The server validates each path against the model. A path that names an
+undeclared field is rejected.
 
 ### Point-in-time statistics
 

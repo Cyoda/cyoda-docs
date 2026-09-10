@@ -105,7 +105,9 @@ guessed, so one tenant can never borrow another's trust.
 
 Provider metadata — the JWKS used to verify signatures — is fetched from each
 issuer's OIDC discovery document, refreshed across the cluster, and guarded
-against server-side request forgery.
+against server-side request forgery. A reload preserves existing key sources and
+re-warms every provider on every node; a warm-up that fails because the identity
+provider is unreachable retries every 30 seconds.
 
 ## Where this is configured
 

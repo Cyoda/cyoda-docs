@@ -60,7 +60,16 @@ see the
 [cyoda-go observability reference](https://github.com/Cyoda/cyoda-go#observability).
 
 Health probes live on the admin port (default 9091): `/livez` (liveness) and
-`/readyz` (readiness). Both are unauthenticated.
+`/readyz` (readiness). Both are unauthenticated. A node that recovers a panic in
+engine or store work marks itself permanently unhealthy. `/readyz` and
+`/health` then report `503`, and `/livez` continues to pass. An orchestrator
+therefore stops routing to the node, and it does not restart it.
+
+Three receive-side HTTP timeouts apply to the API server and to the admin
+server: `CYODA_HTTP_READ_HEADER_TIMEOUT` (`10s`), `CYODA_HTTP_READ_TIMEOUT`
+(`5m`) and `CYODA_HTTP_IDLE_TIMEOUT` (`2m`). `CYODA_HTTP_WRITE_TIMEOUT` ships
+disabled, so the server sets no limit on how long a request may take to produce
+its response.
 
 ## Data directory
 

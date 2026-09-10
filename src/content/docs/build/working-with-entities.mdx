@@ -119,6 +119,56 @@ curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID} \
 
 Unlike `PUT`, **`If-Match` is required** — the merge is applied relative to the base you read, so patching a stale base risks a lost update. The token is the `meta.transactionId` from your last `GET`; a missing header returns `428 PRECONDITION_REQUIRED` and a stale one returns `412`. The merged result is validated strictly against the model schema — a `PATCH` never extends the model, even in an extend-permitting mode. The request is JSON-only (XML ⇒ `415`); RFC 6902 JSON Patch is recognised but returns `501` for now.
 
+## Bounding a write
+
+Every entity write accepts `transactionTimeoutMillis`. It bounds the time that
+the server spends before the **first commit**:
+
+```
+POST /api/entity/JSON/orders/1?transactionTimeoutMillis=10000
+```
+
+When the time elapses, the server rolls the transaction back and fails the
+request with `408 TRANSACTION_TIMEOUT`. It commits nothing. If you omit the
+parameter, the write has no server-side timeout.
+
+A chunked write is an array body that `transactionWindow` splits into chunks.
+The parameter covers the first chunk only. If the time elapses after that, the
+server reports a `TRANSACTION_TIMEOUT` element in the per-chunk response
+instead of an HTTP `408`.
+
+The server rejects the parameter with `400` on a request that
+[joins an open transaction](/build/client-compute-nodes/#1031-transaction-joined-callbacks).
+The same rule applies to `transactionSize` on a delete and to `timeoutMillis`
+on a search.
+
+`503 STORAGE_UNAVAILABLE` reports a problem in the storage layer, and it is
+**retryable**. It covers three conditions: the connection pool could not supply
+a connection, the database aborted the transaction at its idle ceiling, and the
+connection to the database went away.
+
+## When a write is visible
+
+A `2xx` response to a write means that the write is **visible to every later
+read on every node**. A caller can write and then read its own data back. Every
+storage engine delivers this contract — see
+[storage engines](/run/storage-engines/#one-application-contract).
+
+## What the platform will not store
+
+A payload can be valid JSON and still be unstorable. The server rejects five
+forms at the boundary with `400`, on every storage backend and over both REST
+and gRPC:
+
+- **A NUL character** (U+0000) at any position in the payload.
+- **Unpaired UTF-16 surrogates and invalid UTF-8.** The server reads the raw
+  request bytes for this check. A JSON decoder replaces both forms with U+FFFD,
+  which would store a character that you did not send.
+- **A name that occurs more than once in the same object.** Different parts of
+  the system read a different occurrence, so the payload has no single meaning.
+- **Content after the JSON value**, such as `{"x":1}}}`.
+- **A number outside the `numeric` range of PostgreSQL.**
+
 ## Delete
 
 Delete a single entity by id, or delete a matched subset of a model with a condition:
@@ -148,6 +198,35 @@ curl -X DELETE http://localhost:8080/api/entity/orders/1?verbose=true \
 The `DELETE /api/entity/{entityName}/{modelVersion}` endpoint honours an `AbstractConditionDto` request body and removes only the matching entities; an **empty body still means all**. `verbose=true` returns the deleted ids, and the response reports matched-vs-removed counts separately. A malformed condition returns `400 INVALID_CONDITION`.
 
 Supplying the condition matters: earlier releases ignored it and wiped the entire model. Always send the condition you intend (or omit the body deliberately when you really do mean "all").
+
+Both forms accept `pointInTime`, so you can scope a delete to the data as it
+was at a given instant.
+
+### Deleting in batches
+
+By default, the server removes the whole selection in one transaction. Add
+`transactionSize` to remove it in independent, version-guarded batches:
+
+```
+DELETE /api/entity/orders/1?transactionSize=500
+```
+
+A batch that is already committed stays durable if a later batch fails. The
+server records two conditions per id in `deleteResult.idToError`, and does not
+retry either:
+
+- A version mismatch. The entity changed after the server selected it.
+- A commit failure for the batch.
+
+Without `pointInTime`, the server selects the matching entities again before
+each batch. If entities are created at least as fast as the server removes
+them, the selection never becomes empty. In that case the server stops at the
+batch cap and fails the request with a retryable
+**`409 DELETE_NOT_CONVERGED`**. The batches that are already committed stay
+deleted. To make a batched delete terminate, supply `pointInTime`.
+
+The server rejects `transactionSize` with `400` on a request that joins an open
+transaction.
 
 ## Search
 

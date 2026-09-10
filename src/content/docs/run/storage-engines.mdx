@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 Cyoda runs on five storage configurations: four pluggable engines that
 ship with `cyoda-go` (in-memory, SQLite, PostgreSQL, and a commercial
 Cassandra plugin) plus the classic Kotlin runtime that has powered Cyoda
@@ -44,6 +46,19 @@ PostgreSQL plugin layers it on PostgreSQL `REPEATABLE READ`. The
 Cassandra plugin and the classic CPL runtime implement it against
 Cassandra primitives. The application has no way to tell which engine
 it is running against — and that is the point.
+
+**A successful write is visible everywhere.** A `2xx` write response means that
+the data is visible to every later read on every node. A caller can write and
+then read its own data back.
+
+Every engine also agrees on these details:
+
+- Compare-and-save compares the expected transaction id literally, and refuses
+  an empty one.
+- A write inside a transaction carries that transaction's id.
+- A point-in-time read inside a transaction is committed-only.
+- Text comparisons order by byte value.
+- A client disconnect stops the in-flight per-item work.
 
 ## At a glance
 
@@ -95,6 +110,21 @@ unreliable on NFS), nor for any deployment that needs more than one
 `cyoda-go` process against the same data. If either of those applies,
 move to PostgreSQL.
 
+### Size the reader pool against your memory limit
+
+The SQLite plugin opens a dedicated pool of read connections, so a long scan
+does not block concurrent writes. `CYODA_SQLITE_READER_POOL_SIZE` sets the pool
+size. It defaults to `GOMAXPROCS`, limited to the range 4 to 8.
+
+Plan for the memory cost. `CYODA_SQLITE_CACHE_SIZE` (default `64000` KiB) is
+**per connection**. The resident ceiling is therefore
+`(readers + 1) × CYODA_SQLITE_CACHE_SIZE`. On an 8-CPU host with the default
+values, that is approximately 562 MiB.
+
+`GOMAXPROCS` follows the CPU quota, and it does not read the memory limit. In a
+container with many cores and little memory, lower the pool size, the cache
+size, or both.
+
 ## PostgreSQL
 
 The PostgreSQL plugin is `cyoda-go`'s production multi-node tier. A
@@ -115,6 +145,39 @@ in tenant scoping cannot leak data across tenants.
 Write throughput is bounded by the single PostgreSQL primary's write
 capacity. The cluster scales out for connection capacity and read
 fan-out, not for writes against a single PG primary.
+
+### Ceilings, saturation, and the upgrade window
+
+The plugin sets five configurable ceilings on the database side. All five are
+on by default. Each one takes a Go duration. Set a value to `0` to disable that
+limit. A malformed value stops the server at startup.
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `CYODA_POSTGRES_STATEMENT_TIMEOUT` | `5m` | Any single statement |
+| `CYODA_POSTGRES_IDLE_IN_TX_TIMEOUT` | `5m` | Idle gap inside an open transaction |
+| `CYODA_POSTGRES_ACQUIRE_TIMEOUT` | `10s` | Waiting for a pooled connection |
+| `CYODA_POSTGRES_MIGRATE_LOCK_TIMEOUT` | `5m` | Migration advisory lock |
+| `CYODA_POSTGRES_SEARCH_STATEMENT_TIMEOUT` | `30m` | Async-search statements |
+
+The database aborts the transaction of a workflow processor whose
+`responseTimeoutMs` is longer than the idle-in-transaction ceiling. The processor default of 30
+seconds is well below the 5-minute ceiling, so this affects long callouts only.
+
+Three conditions return a retryable **`503 STORAGE_UNAVAILABLE`**: the pool
+could not supply a connection, the idle ceiling aborted the transaction, and
+the connection went away. Seven `cyoda_storage_pool_*` metrics report pool
+saturation at `/metrics`. They are always on.
+
+<Aside type="caution" title="Migration 000008 blocks writers to the entities table">
+
+Migration `000008` adds an index to the `entities` table with a plain
+`CREATE INDEX`. Writers to `entities` are blocked while the index builds.
+
+On a populated deployment, plan a maintenance window sized to the row count of
+the `entities` table.
+
+</Aside>
 
 The plugin makes one explicit, accepted trade-off: each transaction is
 pinned to the `cyoda-go` node that opened it. If that node dies

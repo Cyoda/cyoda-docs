@@ -29,7 +29,7 @@ Three types of work can be delegated:
 |---|---|---|---|
 | **Processing** | Perform actions, such as transforming entity data during a workflow transition, performing CRUD ops on other entities, running reports, interacting with other systems, etc. | `EntityProcessorCalculationRequest` | `EntityProcessorCalculationResponse` |
 | **Criteria Evaluation** | Evaluate a boolean condition (e.g., "should this transition fire?") | `EntityCriteriaCalculationRequest` | `EntityCriteriaCalculationResponse` |
-| **Function** | Compute and return a declared typed value without mutating anything — currently the firing time of a [scheduled transition](/build/workflows-and-processors/#scheduled-transitions). Added in v0.8.3. | `EntityFunctionCalculationRequest` | `EntityFunctionCalculationResponse` |
+| **Function** | Compute and return a declared typed value without mutating anything — currently the firing time of a [scheduled transition](/build/workflows-and-processors/#scheduled-transitions). | `EntityFunctionCalculationRequest` | `EntityFunctionCalculationResponse` |
 
 ## 1.1 Protocol Summary
 
@@ -284,17 +284,15 @@ The platform periodically probes your member with `CalculationMemberKeepAliveEve
 You may also send **client-initiated keep-alive** messages to confirm your own
 liveness.
 
-> ⚠️ **Changed in cyoda-go v0.8.3: the server does not reply to these.** An
-> inbound member keep-alive is liveness-only — it refreshes your member's
-> last-seen timestamp and produces no response event. Each side pings on its
-> own ticker.
+> ⚠️ **The server does not reply to an inbound member keep-alive.** It is
+> liveness-only: it refreshes your member's last-seen timestamp and produces no
+> response event. Each side pings on its own ticker.
 >
-> Previously the server echoed a keep-alive back for every one it received.
-> Against a client that likewise echoed what it received, that formed a
-> zero-delay feedback loop which pinned both processes at ~100% CPU
-> indefinitely, with nothing above `Debug` in the logs to show for it. **Do not
-> write a handler that echoes an inbound keep-alive**, and if yours currently
-> waits for an ack after sending one, remove that wait — it will never arrive.
+> **Do not write a handler that echoes an inbound keep-alive.** Two peers that
+> each echo what they receive form a zero-delay feedback loop, which pins both
+> processes at ~100% CPU with nothing above `Debug` in the logs. If your
+> handler waits for an ack after it sends a keep-alive, remove that wait. No
+> ack arrives.
 
 Anything you send counts as activity: a keep-alive, a processor response, a
 criteria response, or an `EventAckResponse` all refresh liveness. The server
@@ -315,6 +313,15 @@ every `CYODA_KEEPALIVE_INTERVAL` seconds (default `10`).
 > `DeadlineExceeded`. Keep your keep-alive handler fast and non-blocking, and
 > implement the reconnection logic in [Section 12.1](#121-reconnection-strategy);
 > it is the only way back.
+
+The server evicts a member for two conditions. The first is inbound silence for
+`CYODA_KEEPALIVE_TIMEOUT`. The second is a **stalled write**: one
+server-to-client write blocked for `CYODA_KEEPALIVE_TIMEOUT`. The second
+condition evicts a node that continues to send keep-alives while its
+application is blocked.
+
+A slow consumer applies back pressure to its own stream only, not to the
+streams of other members.
 
 ---
 
@@ -403,9 +410,8 @@ The `error.retryable` flag tells the platform whether it should retry the reques
 ### 6.3.1 Infrastructure failures the platform raises
 
 Separately from errors *you* return, the platform raises its own codes when a
-callout cannot be delivered at all. As of cyoda-go v0.8.3 these surface
-uniformly as a **retryable `503`** across all three callout kinds — processor,
-criteria, and function:
+callout cannot be delivered at all. These surface uniformly as a **retryable
+`503`** across all three callout kinds — processor, criteria, and function:
 
 | Code | Meaning |
 |---|---|
@@ -486,15 +492,14 @@ When a workflow transition has an externalized criterion configured as a `functi
 - `requestId` — Must exactly match the request.
 - `entityId` — Must exactly match the request.
 - `matches` — The boolean result: `true` means the criterion is satisfied (transition fires / processor runs), `false` means it is not.
-- `reason` — Optional explanation for a `false` result. **Live end-to-end as of cyoda-go v0.8.3** — see below.
+- `reason` — Optional explanation for a `false` result; see below.
 
 If `success: false`, the platform treats it as a criteria evaluation failure (the criterion evaluates to `false` by default).
 
 ### 7.2.1 Explaining a `false` result
 
-`reason` was previously declared on the wire but discarded, so a criteria node
-could block a transition without being able to say why. It now reaches the
-caller and the audit trail, which makes it worth populating on every `false`.
+`reason` reaches the caller and the audit trail, so populate it on every
+`false`.
 
 Where it surfaces depends on how the criterion was reached:
 
@@ -616,20 +621,19 @@ The auth context is carried as CloudEvent extension attributes in the Protobuf `
 | `system` | An internal platform trigger with no user context |
 
 The value is driven by the principal's **explicit kind**, recorded when the
-principal is established. It is no longer inferred from the presence of a
-`ROLE_M2M` role, a guess that was wrong in both directions.
+principal is established. The platform does not infer it from the roles the
+principal carries.
 
 The attribute is always present and always faithful. If a principal's kind is
 unset or unrecognized, the platform **fails the callout dispatch** rather than
 emitting a normalized placeholder — a bogus `authtype` never reaches your
 compute node.
 
-> ⚠️ **Breaking change in cyoda-go v0.8.3.** `service_account` is retired in
-> favour of `service`, and the `unauthenticated` and `unknown` values are gone
-> — they were never emitted in practice. A compute node that switches on the
-> old strings must be updated, and any `default`/`else` branch that previously
-> caught `unauthenticated` should be re-examined: an unroutable principal now
-> fails the dispatch instead of arriving as a fallback value.
+> ⚠️ **The only values are `user`, `service` and `system`.** There is no
+> `service_account`, `unauthenticated` or `unknown`. A handler that switches on
+> one of those strings never matches it. Do not rely on a `default` or `else`
+> branch to catch an unroutable principal either: the platform fails the
+> dispatch rather than sending one.
 
 ### Attribution vs. execution
 
@@ -663,7 +667,7 @@ List<String> roles = (authClaims == null || authClaims.isEmpty())
 
 The exact accessor depends on your gRPC tooling — in Go, use the generated message's `GetAttributes()` method; in Python, dict-like indexing on `.attributes`. See your language's generated proto bindings.
 
-**Go clients** can skip the manual extraction: cyoda-go v0.8.3 ships an
+**Go clients** can skip the manual extraction. cyoda-go ships an
 `api/grpc/authctx` helper exposing `Type`, `ID` and `Roles` readers plus
 `Require(ce, role)`. `Require` is a **fail-closed** role gate — it returns
 `false` for a nil event, for absent or empty claims, and for
@@ -746,7 +750,7 @@ Your calculation member does not exist in isolation — it is invoked by workflo
 |---|---|---|---|
 | `name` | string | — | **Required.** The processor name. Sent as `processorName` in the request. |
 | `executionMode` | string | — | **Required.** One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`, `COMMIT_BEFORE_DISPATCH`. |
-| `config.attachEntity` | boolean | `true` | Whether to send entity data in the request payload. **Changed in v0.8.3:** a processor that omits this field is now imported with `attachEntity: true`. Set it to `false` explicitly to opt out. |
+| `config.attachEntity` | boolean | `true` | Whether to send entity data in the request payload. A processor that omits this field is imported with `attachEntity: true`. Set it to `false` explicitly to opt out. |
 | `config.calculationNodesTags` | string | `""` | Comma/semicolon-separated tags. Only members whose tags are a superset are eligible. |
 | `config.responseTimeoutMs` | long | `30000` | How long the platform waits for your response before timing out. |
 | `config.retryPolicy` | string | `FIXED` | `NONE` — no retry. `FIXED` — retry with fixed delay (default: 3 retries, 500ms delay). |
@@ -775,7 +779,21 @@ The practical consequences:
 - Callbacks see the cascade's **uncommitted** writes, and their acks stay provisional until `T` commits.
 - `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
 - If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
-- **As of v0.8.3 this covers the search RPCs too.** A callback presenting a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` previously had it silently ignored — the interceptor was wired only for the write RPCs. A processor's writes therefore joined the originating transaction while its *searches* ran unjoined against last-committed state, returning stale results with no error to signal it. If you worked around this by re-reading entities after writing them, that workaround is no longer needed.
+- **The token covers the search RPCs as well as the write RPCs.** A callback that presents a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` joins `T`, so a processor's searches see the writes the same processor has already made in that transaction.
+- **`pointInTime` selects committed state, even inside a joined transaction.**
+  A point-in-time read is committed-only on every backend, so it does not see
+  the writes `T` has not yet committed. Pass it when you want the committed
+  state as at an instant, which is the usual reason to read history from a
+  processor. Omit it when you want to read back what this transaction has
+  written: a current-state read inside `T` is read-your-own-writes correct. An
+  entity that this transaction created, read back with `pointInTime`, answers
+  `404 ENTITY_NOT_FOUND`.
+- **A request that joins an open transaction cannot carry its own deadline.**
+  The server rejects `transactionTimeoutMillis`, `transactionSize` and search's
+  `timeoutMillis` with `400` on a joined callback. The callback does not own
+  the transaction.
+- **The model governs the data you return.** See
+  [the model governs the data a processor returns](/build/workflows-and-processors/#processors).
 
 Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#all-variables)):
 
@@ -959,6 +977,6 @@ Client                                          Server
 | Stream drops unexpectedly | Server restart, network issue, idle timeout | Implement reconnection with exponential backoff (Section 12.1). |
 | `authtype` is `system` unexpectedly | Workflow triggered by an internal platform action (e.g., scheduled transition) or no user context was available | This is expected for system-initiated workflows. If you expect a user context, verify the originating API call is authenticated. |
 | `authclaims` is missing | The triggering principal is a plain `IUser` without extended claims, or the auth type is `system` | Only `user` and `service` auth types include claims. Check `authtype` before parsing claims. |
-| `authtype` is `service`, not `service_account` | cyoda-go v0.8.3 retired `service_account` | Update the switch in your handler. See [Section 9.2](#92-auth-type-values). |
+| `authtype` is `service`, not `service_account` | `service_account` is not a value the platform emits | Switch on `service` instead. See [Section 9.2](#92-auth-type-values). |
 | Callout never arrives; dispatch fails | The originating principal's kind is unset or unrecognized | Dispatch fails closed rather than sending a bogus `authtype`. Check the principal's kind on the platform side. |
 

@@ -42,7 +42,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Workflow Name",
   "desc": "Workflow description",
   "initialState": "StateName",
@@ -55,7 +55,7 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 #### Attributes
 
 - `version`: Workflow schema `MAJOR.MINOR` version. The current version is
-  `"1.3"` (cyoda-go v0.8.3); the server accepts `"1.1"` through `"1.3"` and
+  `"1.4"` (cyoda-go v0.8.4); the server accepts `"1.1"` through `"1.4"` and
   stamps the current version on export. Malformed values such as `"1"` or
   `"1.0"` are rejected at import. Run `cyoda help workflows schema-version` for the
   authoritative supported range.
@@ -63,12 +63,64 @@ You can find the workflow schema in the [API reference](/reference/api/). See th
 - `desc`: Detailed description of the workflow
 - `initialState`: Starting point for new entities
 - `active`: Indicates whether the workflow is active
-- `criterion`: Optional criterion for selecting which workflow applies to a given entity. Uses the same condition types as transition criteria (simple, group, function). When multiple workflows are defined for a model, the platform evaluates each workflow's criterion against the entity to determine which workflow governs it.
+- `criterion`: Optional criterion for selecting which workflow applies to a given entity. Uses the same condition types as transition criteria (simple, lifecycle, group, function). When multiple workflows are defined for a model, the platform evaluates each workflow's criterion against the entity to determine which workflow governs it.
 - `states`: Map of state names to state definitions
 
 ### Multiple Workflows per Model
 
-An entity model can have multiple workflows, each with its own `criterion` at the workflow level. When an entity is created, the platform evaluates each active workflow's criterion to select the applicable workflow. The platform evaluates active workflows in the order they are defined and uses the first whose criterion matches (or the first with no criterion, which matches unconditionally). This allows different processing paths for different categories of entities within the same model.
+An entity model can have multiple workflows, each with its own `criterion` at
+the workflow level. This allows different processing paths for different
+categories of entities within the same model.
+
+The engine selects the workflow on **every call**, and it caches nothing
+between calls. Five operations select a workflow: entity creation, a named
+transition, a loopback re-evaluation, a scheduled transition firing, and
+`GET /entity/{entityId}/transitions`.
+
+The engine applies these rules in order:
+
+1. Read the workflows in stored declaration order. Storage keeps the order of
+   the most recent import, and `MERGE` adds new workflows at the end.
+2. Skip each workflow whose `active` flag is `false`. Selection ignores an
+   inactive workflow, whatever its criterion.
+3. Evaluate the `criterion` of each active workflow against the entity payload
+   and the lifecycle metadata. A `null` or absent criterion always matches.
+4. Select the first active workflow whose criterion matches. The engine does
+   not read the later workflows.
+5. If no active workflow matches, use the embedded default workflow. The engine
+   adds a warning to the response body and writes a log line that carries
+   `reason=no_criterion_matched`.
+
+To make a workflow a catch-all, place it **last** in the import array and give
+it no criterion. An active workflow declared after it is unreachable.
+
+The engine audits selection under the transaction that drives the call. It
+records a `WORKFLOW_SKIP` event for each skipped workflow, with the rejection
+reason of the criterion, and a `WORKFLOW_FOUND` event for the selected one.
+`GET /entity/{entityId}/transitions` is a read and records no event.
+
+<Aside type="caution" title="Choose the selection field with care">
+
+Because the engine evaluates selection on every call, two rules apply to the
+field that a selection criterion reads.
+
+**Select on a field that the caller cannot rewrite in the same request.** The
+engine evaluates the criterion against the payload of the request that it
+serves. A criterion over a client-writable field therefore lets one request
+choose which definition guards it. Where definitions permit different
+operations, the selection field is a security control. Select on an immutable
+field, or on lifecycle metadata.
+
+**Select on a condition that stays true for the whole life of the entity.** An
+entity whose payload changes can bind to a different definition. If the new
+definition does not declare the entity's current state, the engine does **not**
+fall through to a definition that declares it. A named transition fails with
+`400 WORKFLOW_FAILED`, and a loopback ends as a no-op. A new binding can also
+discard a pending scheduled transition: the engine deletes the task when it next
+becomes due, and records `SCHEDULED_TRANSITION_CANCEL` at that time, not at the
+write.
+
+</Aside>
 
 ### Annotations
 
@@ -81,7 +133,7 @@ or routing tags consumed by your own tooling.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "initialState": "INVALID",
   "active": true,
@@ -134,7 +186,7 @@ rejects the whole request rather than silently absorbing mistakes. A
 payload is rejected when it:
 
 - declares a schema `version` outside the supported range (currently
-  `"1.1"`–`"1.3"`) or malformed such as `"1"`/`"1.0"` (rejected with
+  `"1.1"`–`"1.4"`) or malformed such as `"1"`/`"1.0"` (rejected with
   `WORKFLOW_SCHEMA_VERSION_UNSUPPORTED`);
 - carries unknown or misspelled fields (e.g. `transtions`);
 - references a dangling state or reuses a name;
@@ -448,8 +500,21 @@ Group criteria combine multiple conditions using logical operators.
 
 #### Group Criteria Attributes
 
-- `operator`: Logical operator combining conditions (`AND`, `OR`, `NOT`)
+- `operator`: Logical operator combining conditions — exactly `AND`, `OR` or `NOT`, case-sensitive
 - `conditions`: Array of criteria (can be `simple`, `function`, `group`, `lifecycle`, or `array` types — supports arbitrary nesting)
+
+`AND` and `OR` take any number of entries, including zero. An empty `AND` is
+`true`, and an empty `OR` is `false`.
+
+**`NOT` takes exactly one entry.** Zero entries, or two or more, is rejected at
+import with `400 VALIDATION_FAILED`. To negate a group, nest the group inside
+the `NOT`.
+
+`NOT` inverts its child's answer. It is not the negative form of the leaf
+operator, and the two select different entities. Over a wildcard path, and over
+an empty list, an explicit `null` or an absent field, the result is
+non-obvious. See
+[negation](/build/searching-entities/#negation-with-not) for the contract.
 
 ### Function Criteria
 
@@ -519,22 +584,26 @@ that parses into no temporal form at all.
 
 ### Array Criteria
 
-Array criteria evaluate a condition against an array of values.
+Array criteria match values by **position** inside a JSON array.
 
 ```json
 "criterion": {
   "type": "array",
-  "jsonPath": "$.category",
-  "operation": "EQUALS",
-  "value": ["electronics", "software", "services"]
+  "jsonPath": "$.laureates[*]",
+  "values": ["John", null, "Hopfield"]
 }
 ```
 
 #### Array Criteria Attributes
 
-- `jsonPath`: JSONPath expression to the field
-- `operation`: Comparison operator
-- `value`: Array of string values to match against
+- `jsonPath`: JSONPath to the array's **elements**. It must carry a trailing
+  `[*]` — a bare path addresses the array itself, not its elements, and is
+  rejected with `400 INVALID_FIELD_PATH`.
+- `values`: Positional values, one per array index in order. Each non-null
+  entry is a test of the element at that index, and the clause is read as an
+  `AND` of those tests: the example fires when element 0 is `"John"` **and**
+  element 2 is `"Hopfield"`. A `null` entry tests nothing at that index, so a
+  `values` array of all `null` matches every entity.
 
 ### Operator Types
 
@@ -552,6 +621,27 @@ evaluation model — type-directed comparison, null handling, the `LIKE` grammar
 — see [predicate semantics](/build/searching-entities/#predicate-semantics);
 criteria and search share one kernel, so the rules are identical.
 
+### Criterion validation
+
+Criteria and search conditions follow the same
+[path grammar](/build/searching-entities/#how-a-field-path-is-written) and the
+same operator catalogue. The engine enforces them in two places.
+
+**At import**, the engine checks each criterion's `jsonPath`, its operator
+names, and its `LIKE` and `MATCHES_PATTERN` operands. A failure rejects the
+whole import with `400 VALIDATION_FAILED`. A stored workflow continues to
+evaluate, and it fails at its next import.
+
+**At evaluation**, a criterion that the engine cannot answer fails the write
+that it guards:
+
+- A criterion that names a field that the model does not declare stops the save
+  with `400 WORKFLOW_FAILED`, and the engine rolls the save back.
+- A criterion that carries an operator that no evaluator supports fails the
+  save.
+- A model-store failure during evaluation fails the save, even when another
+  condition in the same group also fails structurally.
+
 ## Processors
 
 Processors implement custom logic to run during transitions. All processors are
@@ -560,6 +650,19 @@ Processors implement custom logic to run during transitions. All processors are
 To fire a transition on a delay rather than on an API call or a cascade, you do
 not attach a processor: you put a [`schedule`](#scheduled-transitions) on the
 transition itself.
+
+<Aside type="caution" title="The model governs the data a processor returns">
+
+The engine validates data that a processor returns in the same way as a client
+write. The data must be storable, and it must satisfy the model's schema.
+
+A processor that writes a field that the model does not declare needs the
+model's [`changeLevel`](/build/modeling-entities/#the-change-level-ladder) to
+permit the change. If the level does not permit it, the transition fails with
+`WORKFLOW_FAILED` and rolls back. The engine stores neither the entity nor a
+schema change.
+
+</Aside>
 
 ### Externalized Processors
 
@@ -631,7 +734,7 @@ The following section walks through the configuration step by step.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -645,7 +748,7 @@ Start by defining the overall structure of states and transitions.
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -730,7 +833,7 @@ We add criteria to the `VALIDATE` and `MATCH` transitions:
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
@@ -833,7 +936,7 @@ We add two processors to the `APPROVE` transition in the `SUBMITTED` state, resp
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.4",
   "name": "Payment Request Workflow",
   "desc": "Payment request processing workflow with validation, approval, and notification states",
   "initialState": "INVALID",
