@@ -15,6 +15,9 @@ export default defineConfig({
 	base: process.env.BASE_PATH || '/',
 	// Performance optimizations
 	output: 'static',
+	// Astro 7 defaults this to 'jsx', which strips whitespace between inline
+	// elements using JSX rules rather than HTML rules. Keep the HTML behaviour.
+	compressHTML: true,
 	build: {
 		inlineStylesheets: 'always', // Inline critical CSS for better performance
 		assets: '_astro'
@@ -28,17 +31,13 @@ export default defineConfig({
 		build: {
 			cssCodeSplit: true,
 			target: 'es2022', // Modern browsers for better tree-shaking
-			rollupOptions: {
-				treeshake: {
-					preset: 'recommended'
-					// Do NOT set moduleSideEffects: false here. It strips
-					// CSS-only side-effect imports (e.g. Starlight's
-					// `import '../style/anchor-links.css'` in Page.astro
-					// via virtual:starlight/optional-css), producing
-					// broken rendering for heading anchor links and
-					// other styled Starlight features.
-				}
-			},
+			// Tree-shaking is left at its default. Vite 8 builds with rolldown,
+			// which rejects rollup's `treeshake.preset`, and 'recommended' was
+			// the default anyway. Do NOT add moduleSideEffects: false here: it
+			// strips CSS-only side-effect imports (e.g. Starlight's
+			// `import '../style/anchor-links.css'` in Page.astro via
+			// virtual:starlight/optional-css), producing broken rendering for
+			// heading anchor links and other styled Starlight features.
 			// Optimize CSS delivery
 			cssMinify: true,
 			minify: 'esbuild'
@@ -254,27 +253,27 @@ export default defineConfig({
 				{
 					label: 'Getting Started',
 					collapsed: false,
-					autogenerate: { directory: 'getting-started' }
+					items: [{ autogenerate: { directory: 'getting-started' } }]
 				},
 				{
 					label: 'Concepts',
 					collapsed: true,
-					autogenerate: { directory: 'concepts' }
+					items: [{ autogenerate: { directory: 'concepts' } }]
 				},
 				{
 					label: 'Build',
 					collapsed: true,
-					autogenerate: { directory: 'build' }
+					items: [{ autogenerate: { directory: 'build' } }]
 				},
 				{
 					label: 'Run',
 					collapsed: true,
-					autogenerate: { directory: 'run' }
+					items: [{ autogenerate: { directory: 'run' } }]
 				},
 				{
 					label: 'Cyoda Cloud',
 					collapsed: true,
-					autogenerate: { directory: 'cyoda-cloud' }
+					items: [{ autogenerate: { directory: 'cyoda-cloud' } }]
 				},
 				{
 					label: 'Help',
@@ -287,12 +286,12 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					collapsed: true,
-					autogenerate: { directory: 'reference' }
+					items: [{ autogenerate: { directory: 'reference', collapsed: true } }]
 				},
 				{
 					label: 'Releases',
 					collapsed: true,
-					autogenerate: { directory: 'releases' }
+					items: [{ autogenerate: { directory: 'releases' } }]
 				},
 			],
 			components: {
