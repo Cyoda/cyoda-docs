@@ -1,0 +1,42 @@
+---
+title: Tools
+description: Developer tools, libraries, and project templates for building and operating Cyoda applications.
+sidebar:
+  label: Overview
+  order: 0
+---
+
+Cyoda maintains a set of open-source tools around the platform. They are
+developed in their own repositories under
+[github.com/Cyoda](https://github.com/Cyoda) and released independently of
+cyoda-go.
+
+| Tool | What it is | Runs against |
+|---|---|---|
+| [Cyoda Skills](./cyoda-skills/) | Skill set for AI coding agents (Claude Code plugin) | cyoda-go, Cyoda Cloud |
+| [Dev Console and model-editor MCP](./dev-console/) | Desktop app and MCP server for viewing and editing workflow and entity model files | Local files, no instance required |
+| [Workflow editor libraries](./workflow-editor/) | TypeScript packages to parse, render, and edit Cyoda workflow JSON | Your own application |
+| [Environment dashboard](./env-dashboard/) | Web UI for investigating and exploring a running environment | Cyoda Cloud; cyoda-go with a reduced feature set |
+| [Java client template](./java-client-template/) | Spring Boot template for Java/Kotlin Cyoda applications and compute nodes | Any Cyoda instance |
+| [Python client template and MCP](./python-client-template/) | Quart template for Python compute nodes, plus an MCP server for Cyoda instances | Any Cyoda instance |
+
+## Which tool for which job
+
+- **Designing and building an app with an AI agent** — start with
+  [Cyoda Skills](./cyoda-skills/). Add the
+  [model-editor MCP](./dev-console/#model-editor-mcp) to watch the agent's
+  workflow and entity edits render live.
+- **Reviewing or correcting generated workflow JSON** — the
+  [Dev Console](./dev-console/).
+- **Writing compute nodes** — cyoda-go is language-agnostic: a compute node
+  is any process that speaks the gRPC protocol described in
+  [Client compute nodes](/build/client-compute-nodes/). AI coding agents
+  build them effectively from `cyoda help`, the
+  [API reference](/reference/api/), and [Cyoda Skills](./cyoda-skills/).
+  If you want an opinionated Java/Kotlin or Python starting point instead,
+  fork the [Java](./java-client-template/) or
+  [Python](./python-client-template/) template.
+- **Inspecting entities, workflows, and processing on a running
+  environment** — the [environment dashboard](./env-dashboard/).
+- **Showing or editing workflows in your own UI** — the
+  [workflow editor libraries](./workflow-editor/).
