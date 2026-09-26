@@ -28,9 +28,14 @@ cyoda-go.
   workflow and entity edits render live.
 - **Reviewing or correcting generated workflow JSON** — the
   [Dev Console](./dev-console/).
-- **Writing compute nodes** — the [Java](./java-client-template/) or
-  [Python](./python-client-template/) template, which wrap the gRPC
-  protocol described in [Client compute nodes](/build/client-compute-nodes/).
+- **Writing compute nodes** — cyoda-go is language-agnostic: a compute node
+  is any process that speaks the gRPC protocol described in
+  [Client compute nodes](/build/client-compute-nodes/). AI coding agents
+  build them effectively from `cyoda help`, the
+  [API reference](/reference/api/), and [Cyoda Skills](./cyoda-skills/).
+  If you want an opinionated Java/Kotlin or Python starting point instead,
+  fork the [Java](./java-client-template/) or
+  [Python](./python-client-template/) template.
 - **Inspecting entities, workflows, and processing on a running
   environment** — the [environment dashboard](./env-dashboard/).
 - **Showing or editing workflows in your own UI** — the

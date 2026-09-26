@@ -11,8 +11,8 @@ Repository: [github.com/Cyoda/mcp-cyoda-quart-app](https://github.com/Cyoda/mcp-
 
 The repository contains two things:
 
-- a **Python application template** for Cyoda compute nodes, built on the
-  asynchronous Quart framework
+- an opinionated **Python application template** for Cyoda compute nodes,
+  built on the asynchronous Quart framework — fork it to start a project
 - **`mcp-cyoda`**, an MCP server that lets AI assistants read and write
   entities, search, send edge messages, and manage workflows on a Cyoda
   instance
@@ -21,6 +21,11 @@ Both need a Cyoda instance and an M2M client (`client_id` and secret). On
 cyoda-go, see [`cyoda help auth clients`](/help/auth/clients/).
 
 ## Application template
+
+The template is optional. Compute nodes can be written in any language that
+speaks the [compute-node protocol](/build/client-compute-nodes/), and AI
+coding agents build them directly from `cyoda help`, the
+[API reference](/reference/api/), and [Cyoda Skills](/tools/cyoda-skills/).
 
 The template manages entities, runs their workflows, and connects to Cyoda
 over gRPC to execute processors and criteria. It also exposes REST endpoints
