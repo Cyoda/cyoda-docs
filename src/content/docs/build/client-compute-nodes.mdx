@@ -5,6 +5,10 @@ sidebar:
   order: 40
 ---
 
+import FromTheBinary from '../../../components/FromTheBinary.astro';
+
+<FromTheBinary topic="grpc" />
+
 # 1. Architecture Overview
 
 A **calculation member** is an external gRPC client that participates in entity workflow processing on the Cyoda platform. The platform delegates work to your client over a persistent bidirectional gRPC stream, and your client returns results on the same stream. For the rationale behind preferring gRPC over HTTP for compute nodes, see [APIs and surfaces](/concepts/apis-and-surfaces/).
