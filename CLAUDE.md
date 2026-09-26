@@ -74,7 +74,7 @@ export, llms.txt, and zip stale.
 
 ### Content authoring
 
-- `src/content/docs/` — all docs (MDX/MD), organized by sidebar section: `getting-started/`, `concepts/`, `build/`, `run/`, `cyoda-cloud/`, `help/`, `reference/`, `releases/`.
+- `src/content/docs/` — all docs (MDX/MD), organized by sidebar section: `getting-started/`, `concepts/`, `build/`, `run/`, `cyoda-cloud/`, `help/`, `reference/`, `tools/`, `releases/`.
 - Sidebar sections auto-generate from those directories (see `astro.config.mjs` → `starlight.sidebar`). Adding a new top-level section requires both a directory and a sidebar entry.
 - `src/content/docs/reference/schemas/**/*.mdx` is **auto-generated and git-ignored** — do not edit by hand; change the JSON source under `src/schemas/` or the generator script.
 

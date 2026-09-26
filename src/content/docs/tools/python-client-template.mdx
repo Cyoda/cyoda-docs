@@ -1,0 +1,106 @@
+---
+title: Python client template and MCP
+description: Quart template for Python-based Cyoda compute nodes, and an MCP server that gives AI assistants access to a Cyoda instance.
+sidebar:
+  label: Python client template
+  order: 60
+---
+
+Repository: [github.com/Cyoda/mcp-cyoda-quart-app](https://github.com/Cyoda/mcp-cyoda-quart-app)
+· Apache-2.0
+
+The repository contains two things:
+
+- a **Python application template** for Cyoda compute nodes, built on the
+  asynchronous Quart framework
+- **`mcp-cyoda`**, an MCP server that lets AI assistants read and write
+  entities, search, send edge messages, and manage workflows on a Cyoda
+  instance
+
+Both need a Cyoda instance and an M2M client (`client_id` and secret). On
+cyoda-go, see [`cyoda help auth clients`](/help/auth/clients/).
+
+## Application template
+
+The template manages entities, runs their workflows, and connects to Cyoda
+over gRPC to execute processors and criteria. It also exposes REST endpoints
+for entity and workflow operations.
+
+| Path | Contents |
+|---|---|
+| `application/` | Application code: `entity/`, `routes/`, `processor/` |
+| `common/` | Shared infrastructure: auth, config, gRPC client, repository, service interfaces |
+| `example_application/` | Reference implementation |
+| `cyoda_mcp/` | The MCP server |
+| `tests/` | Test suite |
+
+### Run it
+
+```bash
+git clone https://github.com/Cyoda/mcp-cyoda-quart-app.git
+cd mcp-cyoda-quart-app
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+export CYODA_CLIENT_ID=<client-id>
+export CYODA_CLIENT_SECRET=<client-secret>
+export CYODA_HOST=<cyoda-host>
+
+python -m application.app
+```
+
+`CYODA_HOST` is the host name only, without a scheme.
+
+## MCP server
+
+`mcp-cyoda` is published on PyPI. Run it without installing:
+
+```bash
+pipx run mcp-cyoda
+```
+
+or install it once:
+
+```bash
+pipx install mcp-cyoda
+mcp-cyoda                                  # stdio (default)
+mcp-cyoda --transport http --port 9000     # HTTP
+```
+
+The transport is `stdio`, `http`, or `sse`, set with `--transport` or
+`MCP_TRANSPORT`. The server reads the same `CYODA_*` variables as the
+template.
+
+Register it with an MCP client (Claude Code, Claude Desktop, Cursor, and
+others):
+
+```json
+{
+  "mcpServers": {
+    "cyoda": {
+      "command": "mcp-cyoda",
+      "env": {
+        "CYODA_CLIENT_ID": "<client-id>",
+        "CYODA_CLIENT_SECRET": "<client-secret>",
+        "CYODA_HOST": "<cyoda-host>"
+      }
+    }
+  }
+}
+```
+
+### Capabilities
+
+| Area | Operations |
+|---|---|
+| Entities | Create, read, update, delete, list by model |
+| Search | Field-based and condition-based search |
+| Edge messages | Send and retrieve |
+| Workflows | Export, import, copy between entity models |
+
+## Related
+
+- [Client compute nodes](/build/client-compute-nodes/) — the protocol the
+  template implements.
+- [Edge messages](/build/edge-messages/)

@@ -1,0 +1,65 @@
+---
+title: Cyoda Skills
+description: Skill set that teaches AI coding agents to set up, design, build, and debug Cyoda applications.
+sidebar:
+  order: 10
+---
+
+Repository: [github.com/Cyoda/cyoda-skills](https://github.com/Cyoda/cyoda-skills)
+· Apache-2.0
+
+Cyoda Skills are reusable instructions that teach an AI coding agent how to
+provision a Cyoda instance, model entities, define workflows, implement
+compute processors, and test the result. Claude Code is the best-supported
+agent; the skill files are plain Markdown and can be read by any agent.
+
+## Install
+
+### Claude Code
+
+Install from the plugin marketplace:
+
+```text
+/plugin marketplace add Cyoda/cyoda-skills
+/plugin install cyoda@cyoda
+/reload-plugins
+```
+
+Then start the guided journey:
+
+```text
+/cyoda:app
+```
+
+### Other agents
+
+Point the agent at the repository and ask it to read the skill files before
+building, for example:
+
+> Read the skills in https://github.com/Cyoda/cyoda-skills and use them to
+> help me build a Cyoda application.
+
+## Skills
+
+| Skill | Purpose |
+|---|---|
+| `/cyoda:app` | Entry point — walks the full build journey |
+| `/cyoda:setup` | Install cyoda-go locally or connect to Cyoda Cloud |
+| `/cyoda:auth` | Authenticate to Cyoda Cloud (obtain a JWT) |
+| `/cyoda:design` | Design entities and workflows for an application |
+| `/cyoda:build` | Incrementally build and register entity models and workflows |
+| `/cyoda:compute` | Implement compute node processors and criteria services over gRPC |
+| `/cyoda:test` | Smoke-test a running instance |
+| `/cyoda:debug` | Diagnose failures and browse entity history |
+| `/cyoda:migrate` | Move an application from local cyoda-go to Cyoda Cloud |
+| `/cyoda:docs` | Look up Cyoda documentation |
+| `/cyoda:status` | Report the current connection status |
+
+`/cyoda:docs` prefers `cyoda help` on the local binary, which is
+version-accurate, and falls back to this site.
+
+## Related
+
+- [model-editor MCP](/tools/dev-console/#model-editor-mcp) — live view of
+  the model files an agent is editing.
+- [Build](/build/) — the manual reference behind what the skills do.

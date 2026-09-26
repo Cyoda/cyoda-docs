@@ -1,0 +1,50 @@
+---
+title: Environment dashboard
+description: Web UI for investigating and exploring a running Cyoda environment — workflows, entity instances, reporting, and processing.
+sidebar:
+  order: 40
+---
+
+Repository: [github.com/Cyoda/cyoda-env-dashboard](https://github.com/Cyoda/cyoda-env-dashboard)
+
+The environment dashboard is a general-purpose frontend for investigating and
+exploring a Cyoda environment. It covers:
+
+- workflows, state machines, and entity instances
+- tasks
+- reporting and the catalogue of aliases
+- processing nodes and transitions
+- Trino SQL schemas
+
+Most functionality targets Cyoda Cloud environments. cyoda-go is also
+supported, with a reduced feature set that is growing.
+
+## Run it
+
+The dashboard is a React + TypeScript pnpm monorepo. The deployable
+application is `apps/saas-app`. It requires Node.js 22 or later and the pnpm
+version pinned in the repository.
+
+```bash
+git clone https://github.com/Cyoda/cyoda-env-dashboard.git
+cd cyoda-env-dashboard
+corepack enable
+pnpm install
+pnpm dev
+```
+
+The dev server starts on `http://localhost:5173`. A VS Code Dev Container is
+also provided if you prefer not to install the toolchain locally.
+
+## Configuration
+
+The app will not start until `apps/saas-app/.env` exists and sets
+`VITE_APP_BASE_URL` to the base URL of the Cyoda environment. The dev
+server proxies API calls (`/api`, `/platform-api`, `/platform-processing`,
+`/platform-common`, `/auth`) to that environment.
+
+Sign-in uses Auth0, configured through the `VITE_APP_AUTH0_*` variables.
+
+The full environment reference is in `ENV_FILES_GUIDE.md` and
+`apps/saas-app/README.md` in the repository. A mock backend under
+`tools/backend-mock-server` is available for offline work.

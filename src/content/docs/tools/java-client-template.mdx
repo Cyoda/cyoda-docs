@@ -1,0 +1,75 @@
+---
+title: Java client template
+description: Spring Boot template for building Java and Kotlin Cyoda applications and compute nodes.
+sidebar:
+  order: 50
+---
+
+Repository: [github.com/Cyoda/java-client-template](https://github.com/Cyoda/java-client-template)
+· Apache-2.0
+
+A Gradle and Spring Boot project for building Cyoda applications in Java or
+Kotlin. It includes the Cyoda integration — authentication, the REST
+repository layer, and the gRPC compute-node client — so application code
+contains only entities, processors, criteria, and REST controllers.
+
+## Requirements
+
+- Java 21
+- A Cyoda instance and an M2M client (`client_id` and secret). On cyoda-go,
+  see [`cyoda help auth clients`](/help/auth/clients/).
+
+## Get started
+
+```bash
+git clone https://github.com/Cyoda/java-client-template.git
+cd java-client-template
+```
+
+Configure the connection through Spring profiles or environment variables:
+
+```bash
+export APP_CONFIG_CYODA_HOST=<cyoda-host>:<port>
+export APP_CONFIG_CYODA_CLIENT_ID=<client-id>
+export APP_CONFIG_CYODA_CLIENT_SECRET=<client-secret>
+```
+
+Import the workflow definitions, then run the application:
+
+```bash
+./gradlew runApp -PmainClass=com.java_template.common.tool.WorkflowImportTool \
+  --args='--spring.profiles.active=local'
+./gradlew runApp --args='--spring.profiles.active=local'
+```
+
+The application serves Swagger UI at
+`http://localhost:8080/swagger-ui/index.html`.
+
+## Project layout
+
+| Path | Contents |
+|---|---|
+| `src/main/java/com/java_template/common/` | Framework code: auth, config, gRPC client, repository, `EntityService`, serializers, `WorkflowImportTool`. Not modified by applications. |
+| `src/main/java/com/java_template/application/` | Application code: `entity/`, `processor/`, `criterion/`, `controller/` |
+| `src/main/resources/workflow/<entity>/version_<n>/<entity>.json` | Workflow definitions, one per entity model version |
+
+## Core interfaces
+
+| Interface | Role |
+|---|---|
+| `CyodaEntity` | Domain entity. Implements `getModelKey()` and `isValid()`. |
+| `CyodaProcessor` | Runs business logic during a transition. Implements `process()` and `supports()`. |
+| `CyodaCriterion` | Evaluates a transition condition. Implements `check()` and `supports()`. Must be side-effect free. |
+| `EntityWithMetadata<T>` | Wraps an entity with its technical metadata (ID, state). |
+| `EntityService` | Single interface for all Cyoda data operations. |
+
+Components are discovered through Spring's `@Component` annotation. A
+processor cannot update the entity it is processing through `EntityService`.
+
+Examples of each component type are under `src/test/java/com/example/application/`.
+
+## Related
+
+- [Client compute nodes](/build/client-compute-nodes/) — the protocol the
+  template implements.
+- [Workflows and processors](/build/workflows-and-processors/)

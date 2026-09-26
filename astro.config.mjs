@@ -289,6 +289,11 @@ export default defineConfig({
 					items: [{ autogenerate: { directory: 'reference', collapsed: true } }]
 				},
 				{
+					label: 'Tools',
+					collapsed: true,
+					items: [{ autogenerate: { directory: 'tools' } }]
+				},
+				{
 					label: 'Releases',
 					collapsed: true,
 					items: [{ autogenerate: { directory: 'releases' } }]

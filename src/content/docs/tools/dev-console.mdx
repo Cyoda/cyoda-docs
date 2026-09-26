@@ -1,0 +1,129 @@
+---
+title: Dev Console and model-editor MCP
+description: Local, file-based tools for viewing and editing Cyoda workflow and entity models — a desktop app and an MCP server for AI CLIs.
+sidebar:
+  label: Dev Console
+  order: 20
+---
+
+Repository: [github.com/Cyoda/cyoda-dev-console](https://github.com/Cyoda/cyoda-dev-console)
+· MIT
+
+The repository ships two artifacts for working with workflow and entity model
+files on disk. Neither needs a running Cyoda instance. Both are built on the
+[workflow editor libraries](/tools/workflow-editor/).
+
+- **Dev Console** — a desktop app for inspecting and correcting workflow JSON
+  during the build phase, with an optional in-app AI assistant.
+- **model-editor MCP** (`@cyoda/model-editor-mcp`) — an MCP server that
+  serves the workflow and entity editor to a browser and is driven by an AI
+  CLI such as Claude Code. The agent edits the model files and the diagram
+  updates live.
+
+## Dev Console
+
+### Install
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install --cask cyoda/cyoda/cyoda-dev-console` |
+| Linux | `curl --proto '=https' --tlsv1.2 -fsSL https://github.com/cyoda/cyoda-dev-console/releases/latest/download/install.sh \| sh` |
+| Windows | Build from source — see `RELEASE.md` in the repository |
+
+Updates ship through Homebrew on macOS, or by re-running the installer on
+Linux. The app does not auto-update.
+
+### AI assistant
+
+The in-app assistant is off by default. When enabled, you choose a provider
+(Anthropic, OpenAI, or Gemini) and supply your own API key. With a workflow
+open, the assistant can propose a change and apply it as a diff.
+
+Data handling:
+
+- Everything other than the assistant runs locally.
+- The assistant sends the selected workflow JSON and your chat messages to
+  the chosen provider, using your key. Nothing is sent to Cyoda.
+- Keys are held in session storage and cleared when the window closes.
+- Provider calls go through the app's backend to a fixed allowlist of
+  provider hosts.
+- Applied edits are re-validated and re-serialized before being written to
+  disk.
+
+## model-editor MCP
+
+### Register with Claude Code
+
+Add the server to `.mcp.json` at the project root:
+
+```json
+{
+  "mcpServers": {
+    "model-editor": {
+      "command": "npx",
+      "args": ["-y", "@cyoda/model-editor-mcp@0.3.0", "--project", "."]
+    }
+  }
+}
+```
+
+or run:
+
+```bash
+claude mcp add model-editor -- npx -y @cyoda/model-editor-mcp@0.3.0 --project .
+```
+
+On start, the server logs `model-editor-mcp: http://127.0.0.1:<port>/?token=<hex>`
+to stderr. Open that URL to see the editor. The port is derived from the
+project path and is stable across restarts; the token is regenerated on
+every start. Ask the agent to call `connection_info` for the current URL.
+
+### Model discovery
+
+By default the server discovers:
+
+- workflows under `models/workflow/**/*.json`
+- entities under `models/schema/**/*.json`
+
+Override with `--workflow-globs` / `--entity-globs` at startup, or with the
+`configure_project` tool during a session. Quote the glob values: a shell
+that expands `**` into file paths will crash the server at startup.
+
+The project tree is rescanned on every tool call, so files added or renamed
+on disk are picked up immediately. Workflow file changes made outside the
+agent (an editor, a `git checkout`) are pushed to the browser live.
+
+### Division of work
+
+- **The agent owns content.** Workflows and entities are written only through
+  MCP tools, and every write is validated. A failed validation writes nothing.
+- **You own layout.** Dragging nodes in the browser persists positions to a
+  `<workflow>.layout.json` sidecar next to the workflow file.
+
+The browser sidebar lists every discovered workflow and entity; you can
+browse them without going through the agent.
+
+### Tools
+
+The server exposes 24 tools:
+
+| Group | Tools |
+|---|---|
+| Workflows | `list_workflows`, `show_workflow`, `get_workflow`, `create_workflow`, `update_workflow`, `delete_workflow`, `validate_workflow`, `validate_workflows`, `optimize_layout` |
+| Workflow elements | `add_state`, `remove_state`, `rename_state`, `add_transition`, `update_transition`, `remove_transition` |
+| Entities | `list_entities`, `get_entity`, `show_entity`, `create_entity`, `update_entity`, `delete_entity` |
+| Project | `configure_project`, `get_project` |
+| Connection | `connection_info` |
+
+Element tools make one atomic, validated change and are preferred over
+whole-document `update_workflow`. `rename_state` updates every reference to
+the state: transition targets, `initialState`, lifecycle criteria, and the
+saved layout position.
+
+`show_workflow`, `create_workflow`, and `update_workflow` canonicalize the
+JSON: `operatorType` becomes `operation`, an empty `context` is dropped, and
+`disabled: false` is added where absent. `get_workflow` returns the on-disk
+bytes unchanged.
+
+The full tool reference is in
+[`apps/model-editor-mcp/README.md`](https://github.com/Cyoda/cyoda-dev-console/blob/staging/apps/model-editor-mcp/README.md).

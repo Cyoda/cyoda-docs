@@ -1,0 +1,115 @@
+---
+title: Workflow editor libraries
+description: TypeScript packages for parsing, projecting, rendering, and editing Cyoda workflow JSON.
+sidebar:
+  order: 30
+---
+
+Repository: [github.com/Cyoda/cyoda-workflow-editor](https://github.com/Cyoda/cyoda-workflow-editor)
+· Apache-2.0
+
+A TypeScript monorepo of packages for working with Cyoda workflow JSON in a
+browser. It supports three uses:
+
+1. **Display-only embeds** — a lightweight SVG viewer for static sites and
+   documentation.
+2. **Full editor** — a React Flow canvas with an inspector for editing
+   states, transitions, criteria, processors, and comments.
+3. **JSON editing** — a Monaco editor kept in sync with the canvas.
+
+The Cyoda workflow JSON is the canonical state. Graph, layout, and canvas
+comments are editor metadata and never appear in exported workflow JSON.
+Round-tripping a workflow through the editor is byte-identical.
+
+The [Dev Console and model-editor MCP](/tools/dev-console/) are built on
+these packages.
+
+## Packages
+
+All packages are published to npm under `@cyoda/` and ship ESM, CJS, and
+type declarations.
+
+| Package | Purpose |
+|---|---|
+| `@cyoda/workflow-core` | Domain model: parse, normalize, validate, patch, serialize |
+| `@cyoda/workflow-graph` | Projection of a workflow into nodes and edges |
+| `@cyoda/workflow-layout` | Automatic layout (ELK), with presets and pinned positions |
+| `@cyoda/workflow-viewer` | Read-only SVG renderer; no React Flow or Monaco dependency |
+| `@cyoda/workflow-react` | Full editor shell (canvas, inspector, toolbar); peers on `react` and `reactflow` |
+| `@cyoda/workflow-monaco` | Monaco JSON editor bound to the domain model; peers on `monaco-editor` |
+
+## Display a workflow
+
+```bash
+pnpm add @cyoda/workflow-core @cyoda/workflow-graph @cyoda/workflow-viewer react react-dom
+```
+
+```tsx
+import { parseImportPayload } from "@cyoda/workflow-core";
+import { projectToGraph } from "@cyoda/workflow-graph";
+import { WorkflowViewer } from "@cyoda/workflow-viewer";
+
+const { document } = parseImportPayload(workflowJson);
+if (!document) throw new Error("Invalid workflow JSON");
+
+export function Embedded() {
+  return (
+    <WorkflowViewer
+      graph={projectToGraph(document)}
+      width="100%"
+      height={600}
+      onSelectionChange={(id) => console.log("selected", id)}
+    />
+  );
+}
+```
+
+The viewer supports pan, zoom, and selection. Pass a layout from
+`@cyoda/workflow-layout` through the `layout` prop for automatic
+positioning. Theme through CSS custom properties.
+
+## Edit a workflow
+
+```bash
+pnpm add @cyoda/workflow-core @cyoda/workflow-graph @cyoda/workflow-layout \
+  @cyoda/workflow-viewer @cyoda/workflow-react react react-dom reactflow
+```
+
+```tsx
+import { parseImportPayload } from "@cyoda/workflow-core";
+import { WorkflowEditor } from "@cyoda/workflow-react";
+import "reactflow/dist/style.css";
+
+const { document } = parseImportPayload(workflowJson);
+if (!document) throw new Error("Invalid workflow JSON");
+
+export function EditorPage() {
+  return (
+    <WorkflowEditor
+      document={document}
+      mode="editor"
+      onChange={(doc) => autosave(doc)}
+      onSave={(doc) => pushToBackend(doc)}
+    />
+  );
+}
+```
+
+`mode` is `"viewer"`, `"playground"`, or `"editor"`. `onSave` fires on
+Ctrl/Cmd+S only when the document validates. Set `enableJsonEditor` and
+supply a Monaco runtime through `jsonEditor` to add a synchronized JSON
+pane.
+
+To load and save against a backend, implement the `WorkflowApi` interface
+from `@cyoda/workflow-core` (`exportWorkflows`, `importWorkflows`) and wire
+it in with the `useSaveFlow` hook from `@cyoda/workflow-react`, which handles
+confirmation and concurrency conflicts.
+
+The full prop reference, editor capabilities, and metadata persistence
+options are in the
+[repository README](https://github.com/Cyoda/cyoda-workflow-editor#readme).
+
+## Related
+
+- [Workflows and processors](/build/workflows-and-processors/) — the
+  workflow model these packages operate on.
