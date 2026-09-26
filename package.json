@@ -34,17 +34,17 @@
     "@astrojs/react": "^6.0.5",
     "@astrojs/starlight": "^0.42.0",
     "@jop-software/astro-cookieconsent": "^3.0.1",
-    "@playwright/test": "^1.55.0",
-    "@primer/primitives": "^11.1.0",
-    "@stoplight/elements": "^9.0.6",
+    "@playwright/test": "^1.63.0",
+    "@primer/primitives": "^11.10.0",
+    "@stoplight/elements": "^9.0.25",
     "archiver": "^8.0.0",
-    "astro": "^7.2.10",
+    "astro": "^7.3.2",
     "dotenv": "^17.2.2",
     "glob": "^13.0.6",
-    "playwright": "^1.55.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "sharp": "^0.34.2",
+    "playwright": "^1.63.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sharp": "^0.35.4",
     "turndown": "^7.2.1",
     "turndown-plugin-gfm": "^1.0.2",
     "vanilla-cookieconsent": "^3.1.0"
@@ -63,6 +63,9 @@
       "esbuild",
       "sharp",
       "fsevents"
+    ],
+    "ignoredBuiltDependencies": [
+      "@scarf/scarf"
     ]
   },
   "packageManager": "pnpm@10.34.4+sha512.8768be55200ae3f2226b6527fcca2687e14bc4e5f12d7721a0f25da3df47915177058648db4177baf348120fa0ba2752d8d8d93f6beaf1fe64ae18da8de961af"
