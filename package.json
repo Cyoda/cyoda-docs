@@ -39,7 +39,7 @@
     "@stoplight/elements": "^9.0.25",
     "archiver": "^8.0.0",
     "astro": "^7.3.2",
-    "dotenv": "^17.2.2",
+    "dotenv": "^18.0.1",
     "glob": "^13.0.6",
     "playwright": "^1.63.0",
     "react": "^19.3.0",
