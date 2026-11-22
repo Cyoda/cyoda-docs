@@ -1,6 +1,6 @@
 ---
 title: "CLI"
-description: "cyoda-go command-line interface — narrative navigator over `cyoda help cli`."
+description: "cyoda-go command-line interface: the subcommands, their exit codes, and how to browse `cyoda help`."
 sidebar:
   order: 30
 ---
@@ -18,36 +18,92 @@ export const cliTopics = (() => {
 
 <FromTheBinary topic="cli" />
 
-The `cyoda` binary is the server and its own control surface. It runs as a
-single long-lived process by default, with a small number of subcommands
-for bootstrapping, health, and migration. Every flag, subcommand, and env
-var is documented in-binary via `cyoda help <topic>` and is version-
-accurate to whatever binary you are running.
+The `cyoda` binary is the server and its own control surface. Run with no
+subcommand, or with `serve`, it starts the server. A few subcommands cover
+first-run setup, health probes, migrations and the operator's first admin
+token. Every subcommand, environment variable and error code is documented in
+the binary through `cyoda help`, which matches the version you are running.
 
-## Output formats
+## Subcommands
 
-Every help topic supports three output formats via `--format`:
+| Command | Purpose | Exit codes |
+| --- | --- | --- |
+| `cyoda`, `cyoda serve` | Start the API server. | `0` clean shutdown; `1` startup failure; `2` an argument after `serve`, or a second signal forcing exit |
+| `cyoda init [--force]` | Write a starter user config that enables SQLite. | `0` success or no-op; `1` I/O error; `2` bad flags or arguments |
+| `cyoda health` | Probe `/readyz` on the admin listener. | `0` ready; `1` not ready or unreachable; `2` any argument |
+| `cyoda migrate [--timeout <duration>]` | Apply storage migrations for the configured backend and exit. | `0` success or no-op; `1` runtime error; `2` bad flags or arguments |
+| `cyoda token --tenant <id> [--user] [--roles] [--ttl]` | Sign a short-lived admin token with the signing key and print it. | `0` printed; `1` key or configuration error; `2` flag error |
+| `cyoda help [<topic>...] [--format=<fmt>]` | Browse the help topic tree. | `0` found; `1` render failure; `2` unknown topic or action, bad format |
 
-- `text` (default on a TTY) — human reading.
-- `markdown` (default off-TTY) — paste into docs, PRs, chat.
-- `json` — machine-readable, stable schema; consumed by tools like
-  cyoda-docs' own build pipeline.
+`--help` (`-h`) and `--version` (`-v`) are accepted in place of a subcommand.
+After a subcommand, a lone `-h` or `--help` prints that subcommand's help.
 
-## Drilldowns
+The server takes **no flags**. All configuration comes from `CYODA_*`
+environment variables and env files (see
+[Configuration](/reference/configuration/)). An argument cyoda does not
+recognise is an error: an unknown subcommand, any flag on the server, or an
+argument given to a subcommand that takes none. cyoda prints the message and
+the usage summary to stderr and exits `2` without loading configuration or
+starting anything:
 
-Topics that naturally subdivide take a multi-word path on the CLI: `cyoda
-help search async`, `cyoda help grpc compute`, and so on. The same path
-appears in the JSON surface as an array.
+```text
+$ cyoda --port 8080
+cyoda: unknown flag "--port"; the server takes no flags, it is configured by CYODA_* environment variables (see 'cyoda help config')
+```
+
+`cyoda token` is how the platform operator gets the first token for the admin
+API in JWT mode. See [Identity and IAM → first admin
+token](/reference/identity-and-iam/#first-admin-token) and
+[`cyoda help cli token`](/help/cli/token/).
+
+## Browsing help
+
+Topics form a dot-separated tree. Name a topic by its **dotted id** in one
+argument, or by its parts as separate words; both resolve to the same topic:
+
+```bash
+cyoda help auth.tokens
+cyoda help auth tokens
+cyoda help errors.FORBIDDEN
+```
+
+A topic path that does not exist exits `2`. `cyoda help` with no arguments
+lists the top-level topics. The same tree is served by a running server at
+`GET /api/help` and `GET /api/help/{topic}` (dotted or slash form), and
+mirrored on this site under [Help](/help/).
+
+### Output formats
+
+`--format=<auto|text|markdown|json>` selects the output form:
+
+- `auto` (default): `text` on a terminal, `markdown` otherwise.
+- `text`: for human reading.
+- `markdown`: to paste into docs, pull requests or chat.
+- `json`: machine-readable, with a stable schema. This site's build pipeline
+  reads it.
+
+### Topic actions
+
+Some topics publish machine-readable content as actions, invoked as
+`cyoda help <topic> <action>`. An action writes raw content to stdout instead
+of the topic's help body:
+
+```bash
+cyoda help openapi json        # also: yaml, tags
+cyoda help grpc proto          # also: json
+cyoda help cloudevents json
+cyoda help config all
+cyoda help workflows schema-version versions
+```
 
 ## Related topics
 
-The subset of `cyoda help` topics directly relevant to the CLI surface
-itself is below.
+The `cyoda help` topics for the CLI itself are below.
 
 <ul>
   {cliTopics.map((t) => (
     <li>
-      <strong><code>cyoda help {t.path.join(' ')}</code></strong> — {t.title.replace(/^[^—]*—\s*/, '')}
+      <strong><code>cyoda help {t.topic}</code></strong> — {t.title.replace(/^[^—]*—\s*/, '')}
       <br />
       <span style="opacity: 0.8;">{t.synopsis}</span>
     </li>

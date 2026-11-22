@@ -1,0 +1,423 @@
+---
+title: "Authenticating your application"
+description: "Step by step: the clients an application needs, the trusted key, the on-behalf-of token exchange, compute nodes, recorded identity, errors and rotation."
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import FromTheBinary from '../../../components/FromTheBinary.astro';
+import SequenceFlow from '../../../components/SequenceFlow.astro';
+
+<FromTheBinary topic="auth integration" />
+
+Your users sign in to your application, not to Cyoda. Your application decides
+what each user may do, then calls Cyoda for them, and Cyoda records each
+change for the user and for the client that made it. This page walks through
+what to create, what to send and what comes back. The model behind it is in
+[Authentication and identity](/concepts/authentication-and-identity/).
+Endpoint and setting details are in
+[Identity and IAM](/reference/identity-and-iam/).
+
+The examples use the tenant `acme` and the host `cyoda.example.com`. The
+responses were captured from a cyoda-go server in JWT mode. Tokens and
+secrets are shortened.
+
+## The parts of an application
+
+| Part | Client | Grant | A change is recorded as (for / by) |
+| --- | --- | --- | --- |
+| Backend acting for signed-in users | On-behalf-of | Token exchange | the user / the backend's client |
+| Background job or script | Plain, one per job | `client_credentials` | the client / the client |
+| Compute-node service | Plain, one per service | `client_credentials` | the transaction's origin / the node's client |
+| Tenant admin | Admin, or the operator per change | `client_credentials` | the admin client / the admin client |
+
+**Use one client per part.** A part is one deployable unit with one job. All
+replicas of a part share its client, and separate parts never share one. Each
+part can then be rotated or revoked on its own, and the executor recorded on
+every change names the part that made it.
+
+There is no finer permission split. Every plain or admin client holds
+`ROLE_M2M`, which reaches every data operation of the tenant, and any plain
+client can join as a compute node. Treat every client secret as access to all
+of the tenant's data.
+
+## Step 1: get a tenant and its first admin client
+
+**Who:** the platform operator, once per tenant.
+
+A tenant exists as soon as a token names it, and only the operator's
+`cyoda token` can name a new one. Run it where `CYODA_JWT_SIGNING_KEY` is
+available, then create the tenant's first admin client. The node that takes
+the call must run with `CYODA_IAM_M2M_ADMIN_ROLE_ENABLED=true`.
+
+```bash
+# Kubernetes: kubectl exec POD -- /cyoda token --tenant acme
+ADMIN_TOKEN=$(cyoda token --tenant acme)
+
+# -H @- reads the header from stdin, which other local users cannot see.
+curl -X POST "https://cyoda.example.com/api/clients?clientId=acme-admin&withAdminRole=true" \
+  -H @- <<<"Authorization: Bearer ${ADMIN_TOKEN}"
+```
+
+Hand the `client_id`, the `client_secret` and the tenant id to the tenant
+admin over a secure channel. A standing admin client is the most powerful
+credential of the tenant. The alternative is to have the operator sign a
+short-lived `cyoda token --tenant acme` for each administrative change.
+
+## Step 2: create one client per part
+
+**Who:** the tenant admin.
+
+```bash
+# A token for the tenant admin: HTTP Basic, credentials on stdin.
+TENANT_ADMIN_TOKEN=$(curl -s -X POST https://cyoda.example.com/api/tenants/acme/oauth/token \
+  -K- <<<"user = \"${ADMIN_CLIENT_ID}:${ADMIN_CLIENT_SECRET}\"" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" | jq -r .access_token)
+
+# The backend's on-behalf-of client.
+curl -X POST "https://cyoda.example.com/api/clients?clientId=backend-obo&onBehalfOf=true" \
+  -H @- <<<"Authorization: Bearer ${TENANT_ADMIN_TOKEN}"
+
+# One plain client per compute-node service and per job.
+curl -X POST "https://cyoda.example.com/api/clients?clientId=billing-job" \
+  -H @- <<<"Authorization: Bearer ${TENANT_ADMIN_TOKEN}"
+```
+
+```json
+{
+  "client_id": "backend-obo",
+  "client_secret": "de95…d548",
+  "client_secret_expires_at": 0,
+  "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+  "onBehalfOf": true,
+  "roles": ["ROLE_M2M"]
+}
+```
+
+The secret is shown once. Store each `client_id` and `client_secret` in your
+secret store at once, under a name that says which part uses it. That store
+is your inventory. A re-run that creates an id the tenant already holds gets
+`409 M2M_CLIENT_EXISTS`. If the store has no secret for that id, reset the
+secret with `PUT /clients/{clientId}/secret` rather than delete and create
+again.
+
+Your application must know its tenant id from configuration: the credentials
+response does not carry it.
+
+## Step 3: register the application's trusted key
+
+**Who:** the tenant admin. Every node must run with
+`CYODA_IAM_TRUSTED_KEY_REGISTRATION_ENABLED=true`.
+
+Generate the key pair where the backend runs. The private key never leaves
+it.
+
+```bash
+openssl genrsa -out app-key.pem 2048
+
+# The JWK modulus n, base64url without padding. The exponent 65537 is "AQAB".
+N=$(openssl rsa -in app-key.pem -noout -modulus | cut -d= -f2 \
+    | xxd -r -p | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+curl -X POST https://cyoda.example.com/api/oauth/keys/trusted \
+  -H @- -H "Content-Type: application/json" \
+  -d "{\"keyId\":\"backend-key-2026-11\",\"jwk\":{\"kty\":\"RSA\",\"n\":\"${N}\",\"e\":\"AQAB\",\"alg\":\"RS256\",\"use\":\"sig\"}}" \
+  <<<"Authorization: Bearer ${TENANT_ADMIN_TOKEN}"
+```
+
+`GET /oauth/keys/trusted` then lists it:
+
+```json
+[
+  {
+    "active": true,
+    "jwk": { "alg": "RS256", "e": "AQAB", "kid": "backend-key-2026-11", "kty": "RSA", "n": "xZyEjnejDeuM…", "use": "sig" },
+    "keyId": "backend-key-2026-11",
+    "legalEntityId": "acme",
+    "validFrom": "2026-11-22T22:05:38.889098Z",
+    "validTo": "2027-11-22T22:05:38.889098Z"
+  }
+]
+```
+
+The `keyId` becomes the `kid` your backend signs with. Without `validTo`, the
+key is valid for 365 days; rotate it before then (see [Rotation](#rotation)).
+
+## Step 4: act for a signed-in user
+
+**Who:** your backend, with its on-behalf-of client. Do this only after your
+application has authenticated the user and decided that the user may do what
+they ask. Cyoda applies the client's roles, never the user's.
+
+<SequenceFlow label="Calling Cyoda for a signed-in user">
+
+1. **User → Your backend** Signs in through your identity provider and makes a request
+2. **Your backend → Cyoda** Token exchange: the on-behalf-of client's credentials plus a user assertion signed with the tenant's trusted key
+3. **Cyoda → Your backend** Access token for the user, carrying the client's roles and naming the client in `act`
+4. **Your backend → Cyoda** API call with that token
+5. **Cyoda → Your backend** Response; the change is recorded for the user and executed by the client
+6. **Your backend → User** Response
+
+</SequenceFlow>
+
+**Sign a user assertion.** It is a JWT with:
+
+- header `"alg": "RS256"` and `"kid": "<keyId>"`;
+- `sub`: your application's stable id for the user, 1 to 255 characters,
+  recorded byte for byte (`Alice` and `alice` are two users). `system` is
+  reserved;
+- `caas_org_id`: your tenant id;
+- `aud`: Cyoda's issuer, `CYODA_JWT_ISSUER` (default `cyoda`);
+- `iat`: now, and `exp`: at most `iat + 300`.
+
+Cyoda allows 30 seconds of clock skew and ignores every other claim, roles
+included. It keeps no record of used assertions, so sign a fresh one for each
+exchange and never let it leave your backend.
+
+**Exchange it** at the token endpoint, authenticating the client with HTTP
+Basic:
+
+```bash
+curl -X POST https://cyoda.example.com/api/tenants/acme/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:jwt" \
+  -K- <<EOF
+user = "${OBO_CLIENT_ID}:${OBO_CLIENT_SECRET}"
+data = "subject_token=${USER_ASSERTION}"
+EOF
+```
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIs…",
+  "expires_in": 300,
+  "issued_token_type": "urn:ietf:params:oauth:token-type:jwt",
+  "token_type": "Bearer"
+}
+```
+
+The issued token is for the user, acting through your client. Its payload:
+
+```json
+{
+  "act": { "sub": "backend-obo" },
+  "caas_org_id": "acme",
+  "caas_tier": "unlimited",
+  "caas_user_id": "alice",
+  "exp": 1795385449,
+  "iat": 1795385149,
+  "iss": "cyoda",
+  "jti": "a158c731-379c-47a8-ac4c-fa9f98fc6015",
+  "scopes": ["ROLE_M2M"],
+  "sub": "alice"
+}
+```
+
+**Call Cyoda with it** as `Authorization: Bearer <access_token>` on HTTP, or
+as gRPC metadata `authorization`. The token works on data operations only. It
+never administers and never opens a compute-node stream.
+
+**Cache one token per user.** Reuse the token until less than 60 seconds of
+its life remain, then exchange a new assertion. Exchange once more if a call
+answers `401`. The token lives until the assertion's `exp` at most, so sign
+each assertion just before the exchange, with `exp = iat + 300`.
+
+A backend in Node.js 18 or later needs no library for this:
+
+```js
+import { createPrivateKey, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
+const CYODA = 'https://cyoda.example.com/api';
+const TENANT = 'acme';
+const KEY_ID = 'backend-key-2026-11';
+const privateKey = createPrivateKey(readFileSync(process.env.CYODA_TRUSTED_KEY_FILE));
+const basic = 'Basic ' + Buffer.from(
+  `${process.env.CYODA_CLIENT_ID}:${process.env.CYODA_CLIENT_SECRET}`).toString('base64');
+const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+
+function userAssertion(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  const input = b64url({ alg: 'RS256', kid: KEY_ID }) + '.' + b64url({
+    sub: userId, caas_org_id: TENANT, aud: 'cyoda', iat: now, exp: now + 300,
+  });
+  return `${input}.${sign('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
+}
+
+const cache = new Map(); // userId -> { token, expiresAt }
+
+export async function tokenFor(userId) {
+  const hit = cache.get(userId);
+  if (hit && hit.expiresAt - Date.now() > 60_000) return hit.token;
+  const res = await fetch(`${CYODA}/tenants/${TENANT}/oauth/token`, {
+    method: 'POST',
+    headers: { Authorization: basic, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      subject_token: userAssertion(userId),
+    }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(`token exchange ${res.status}: ${body.error_description}`);
+  cache.set(userId, { token: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 });
+  return body.access_token;
+}
+```
+
+Each client may make `CYODA_IAM_TOKEN_REQUESTS_PER_MINUTE` token requests per
+minute on each node (600 by default). With 300-second tokens renewed when 60
+seconds remain, one on-behalf-of client sustains about 2400 concurrently
+active users per node.
+
+## Step 5: work for no user
+
+**Who:** background jobs, scripts and migrations. Each uses a plain client:
+
+```bash
+curl -X POST https://cyoda.example.com/api/tenants/acme/oauth/token \
+  -K- <<<"user = \"${CLIENT_ID}:${CLIENT_SECRET}\"" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials"
+```
+
+```json
+{"access_token":"eyJhbGciOiJSUzI1NiIs…","expires_in":300,"token_type":"Bearer"}
+```
+
+Changes are recorded with the client as both the principal they are for and
+the executor. Cache the token and fetch a new one when less than 60 seconds
+remain. Never use an on-behalf-of token for work no user asked for.
+
+## Step 6: connect a compute node
+
+**Who:** each compute-node service, with a plain client that all its replicas
+share.
+
+1. Get a token with `client_credentials`. Only a client's own
+   `client_credentials` token opens a stream. An on-behalf-of token or a
+   `cyoda token` is refused with `PermissionDenied`.
+2. Open the stream on the gRPC port with metadata
+   `authorization: Bearer <token>`, and join with your tags and your tenant
+   id as `joinedLegalEntityId`.
+3. Keep the stream. It outlives the token that opened it. Cyoda re-reads your
+   client every 60 seconds and closes the stream if the client was deleted or
+   its secret reset.
+4. For each callback into Cyoda, send the client's current token. Echo the
+   callout's transaction token (`X-Tx-Token` on HTTP, `tx-token` on gRPC) when
+   the callback must join the callout's transaction.
+
+Reconnect handling for each stream status is on
+[client compute nodes](/build/client-compute-nodes/) and in
+[`cyoda help grpc`](/help/grpc/).
+
+## What Cyoda records
+
+Every change records the principal it is for and the executor. After the
+exchange above, an entity created with alice's token shows in
+`GET /entity/{entityId}/changes` as:
+
+```json
+[
+  {
+    "attributedKind": "user",
+    "changeType": "CREATE",
+    "executedBy": { "id": "backend-obo", "kind": "service" },
+    "timeOfChange": "2026-11-22T22:05:59.465314Z",
+    "transactionId": "e627744c-e6c0-11f1-8f45-ae468cd3ed16",
+    "user": "alice"
+  }
+]
+```
+
+Audit events carry the same pair as `actor` and `executedBy`. Every callout
+to a compute node carries it as `authtype`/`authid` (who the work is for) and
+`authexectype`/`authexecid` (who does it). `authclaims` holds the executor's
+roles, never the user's.
+
+<Aside type="caution" title="Segregation of duties needs both principals">
+`authtype == "user"` alone does not mean the user acted now. It is also true
+for a compute node's write-back inside the user's transaction and for a
+scheduled firing the user armed. An approval check requires
+`authtype == "user"`, requires `authexectype == "service"` with `authexecid`
+on an allow-list of your backend's on-behalf-of client ids, and compares
+`authid` with the recorded submitter byte for byte. The full pattern is in
+[`cyoda help auth integration`](/help/auth/integration/).
+</Aside>
+
+## Errors
+
+The token endpoint answers in the OAuth error shape,
+`{"error": "…", "error_description": "…"}`, and a retry is always safe:
+
+- `400 invalid_request` with `subject token claims rejected` or
+  `subject token has expired`: often clock drift or a stale assertion. Sign a
+  fresh one and retry once. If it fails again, check `aud`, `exp − iat` and
+  your clocks.
+- Any other `400`, and `403 access_denied`: your request or setup is wrong.
+  Fix it; do not retry.
+- `401 invalid_client`: wrong credentials, or the client was deleted or reset.
+  Re-read the secret store once, then stop and alert.
+- `429 slow_down` and `503 temporarily_unavailable`: wait `Retry-After`
+  seconds and retry, with backoff.
+
+On data calls, a `401` did nothing: fetch a new token and send the same
+request again, once. A second `401` with a fresh token is a configuration
+error. A `403` is not retryable: use the right client. The full error tables,
+with every `error_description`, are in
+[`cyoda help auth integration`](/help/auth/integration/) and
+[`cyoda help auth tokens`](/help/auth/tokens/).
+
+## Rotation
+
+- **A client secret, without downtime.** A reset ends the old secret at once.
+  To rotate without a gap, create a second client of the same kind, roll every
+  replica onto it, then delete the old client. If you keep an allow-list of
+  `authexecid` values, add the new id first and remove the old one last.
+- **A trusted key.** Register the new key under a new `keyId` while the old one
+  stays active, and switch the backend to sign with it. After 300 seconds, no
+  assertion signed with the old key can still be in flight; invalidate or
+  delete it then. Tokens already issued are signed by Cyoda and stay valid.
+
+If a private key or a secret leaks, invalidate the key or reset the secret at
+once instead. The incident procedures are in
+[`cyoda help auth integration`](/help/auth/integration/).
+
+## Running it locally
+
+Mock mode (`CYODA_IAM_MODE=mock`, the default) accepts every request as one
+fixed principal and has no client store. The token endpoint and the client
+endpoints answer `501`, so **on-behalf-of access cannot be exercised in mock
+mode**. To run the flow above on one machine, start cyoda-go in JWT mode with
+a signing key and trusted-key registration enabled:
+
+```bash
+openssl genrsa -out signing.pem 2048
+CYODA_IAM_MODE=jwt CYODA_JWT_SIGNING_KEY_FILE=$PWD/signing.pem \
+CYODA_IAM_TRUSTED_KEY_REGISTRATION_ENABLED=true \
+CYODA_IAM_M2M_ADMIN_ROLE_ENABLED=true cyoda
+```
+
+Then `cyoda token --tenant acme --roles ROLE_ADMIN,ROLE_M2M`, in the same
+environment, gives you a token that can create clients and keys and reach
+data. The memory backend keeps nothing across a restart: clients and trusted
+keys must be created again. The complete script, including signing the
+assertion with `openssl`, is under *Running it locally* in
+[`cyoda help auth integration`](/help/auth/integration/).
+
+## Security checklist
+
+- **TLS.** cyoda-go's listeners serve plaintext. Terminate TLS at the gateway,
+  ingress or service mesh, and have every client and compute node verify the
+  server certificate. A compute node can trust the callout attributes only
+  over TLS.
+- **Keep credentials on the server.** The trusted key's private key, client
+  secrets, user assertions and Cyoda tokens never reach a browser or a mobile
+  app.
+- **Authorize before you act.** Cyoda records the user you assert and enforces
+  only the client's roles.
+- **Rate-limit the token endpoint** per source at the ingress (see
+  [Identity and IAM](/reference/identity-and-iam/#token-endpoint)).
