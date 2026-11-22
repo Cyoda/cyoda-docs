@@ -27,7 +27,22 @@ curl -X POST http://localhost:8080/api/message/new/orders-inbound \
 
 The `{subject}` path segment (`orders-inbound` above) names the logical channel. The optional metadata map is carried under `metaData` (camelCase, symmetric with the response). The server assigns the time-UUID and returns it.
 
+Every message endpoint requires `ROLE_M2M` in the token (`403 FORBIDDEN` without it). See [Authenticating applications](/build/authenticating-applications/) for the tokens that carry it.
+
 For the full surface — headers, retrieval, and the exact envelope — run `cyoda help messages` against your binary; the callout above links the authoritative reference.
+
+## Who a message is recorded for
+
+The stored header records who sent the message, taken from the bearer token and never from a request header:
+
+- `userId` and `attributedKind`: the principal the message is attributed to. For an on-behalf-of token this is the user the token asserts.
+- `executedBy` (`{id, kind}`): the principal that sent it. For an on-behalf-of token this is the on-behalf-of client; for a client's own token it equals the attributed principal.
+
+To record a message for a user, send it with an on-behalf-of token for that user.
+
+## Saving messages from a processor
+
+A message is not part of any entity transaction. A message saved by a processor, including one saved with the callout's transaction token, stays when the operation's transaction rolls back, and is saved again if the processor is repeated on another compute member. Make the save idempotent and attach the message id to the entity that owns it, so that a repeat leaves at most an orphaned message, which costs disk space and nothing else. See [Idempotency](/build/client-compute-nodes/#124-idempotency).
 
 ## Where to go next
 

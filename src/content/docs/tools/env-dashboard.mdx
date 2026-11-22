@@ -1,6 +1,6 @@
 ---
 title: Environment dashboard
-description: Web UI for investigating and exploring a running Cyoda environment — workflows, entity instances, reporting, and processing.
+description: Web UI for investigating and exploring a running cyoda-go instance — workflows, entity instances, and entity data.
 sidebar:
   order: 40
 ---
@@ -8,16 +8,19 @@ sidebar:
 Repository: [github.com/Cyoda/cyoda-env-dashboard](https://github.com/Cyoda/cyoda-env-dashboard)
 
 The environment dashboard is a general-purpose frontend for investigating and
-exploring a Cyoda environment. It covers:
+exploring a running instance. Against cyoda-go it shows workflows and their
+state machines, entity instances, and the entity viewer.
 
-- workflows, state machines, and entity instances
-- tasks
-- reporting and the catalogue of aliases
-- processing nodes and transitions
-- Trino SQL schemas
+:::caution[Not yet compatible with JWT-mode cyoda-go]
+The dashboard signs users in with an OIDC provider and sends that provider's
+access token to the API. cyoda-go in JWT mode accepts only cyoda tokens, and
+end-user requests have to come from a backend through an on-behalf-of client
+(see [Authenticating applications](/build/authenticating-applications/)), so
+the dashboard cannot authenticate against it yet.
 
-Most functionality targets Cyoda Cloud environments. cyoda-go is also
-supported, with a reduced feature set that is growing.
+For local use, run cyoda-go in mock auth mode (`CYODA_IAM_MODE=mock`), which
+needs no token, and leave the dashboard's sign-in off.
+:::
 
 ## Run it
 
@@ -30,6 +33,8 @@ git clone https://github.com/Cyoda/cyoda-env-dashboard.git
 cd cyoda-env-dashboard
 corepack enable
 pnpm install
+cp apps/saas-app/.env.template apps/saas-app/.env
+# edit apps/saas-app/.env (see Configuration), then:
 pnpm dev
 ```
 
@@ -38,13 +43,22 @@ also provided if you prefer not to install the toolchain locally.
 
 ## Configuration
 
-The app will not start until `apps/saas-app/.env` exists and sets
-`VITE_APP_BASE_URL` to the base URL of the Cyoda environment. The dev
-server proxies API calls (`/api`, `/platform-api`, `/platform-processing`,
-`/platform-common`, `/auth`) to that environment.
+The app will not start until `apps/saas-app/.env` sets `VITE_APP_BASE_URL` to
+the base URL of the instance, for example `http://localhost:8080` for a local
+cyoda-go. The dev server proxies API calls (`/api` and the other prefixes the
+app uses) to that URL.
 
-Sign-in uses Auth0, configured through the `VITE_APP_AUTH0_*` variables.
+For cyoda-go, set `VITE_FEATURE_FLAG_IS_CYODA_GO=true`. The app then shows
+only the panels whose endpoints cyoda-go serves, and its workflow editor
+checks workflows against cyoda-go's import rules. Those checks follow
+cyoda-go 0.8.4: they accept workflow schema versions `1.1` to `1.4`, not
+`1.5`.
 
-The full environment reference is in `ENV_FILES_GUIDE.md` and
-`apps/saas-app/README.md` in the repository. A mock backend under
-`tools/backend-mock-server` is available for offline work.
+Sign-in uses a generic OIDC provider (Authorization Code with PKCE),
+configured through the `VITE_APP_OIDC_*` variables. It is on only when both
+`VITE_APP_OIDC_ISSUER` and `VITE_APP_OIDC_CLIENT_ID` are set. For a mock-mode
+cyoda-go, leave both unset.
+
+The full environment reference is in `ENV_FILES_GUIDE.md`,
+`apps/saas-app/README.md`, and `docs/feature-matrix.md` in the repository. A
+mock backend under `tools/backend-mock-server` is available for offline work.

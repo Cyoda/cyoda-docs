@@ -9,21 +9,30 @@ Repository: [github.com/Cyoda/java-client-template](https://github.com/Cyoda/jav
 · Apache-2.0
 
 An opinionated Gradle and Spring Boot starting point for Cyoda applications
-in Java or Kotlin. Fork it to start a project. It includes the Cyoda
-integration — authentication, the REST repository layer, and the gRPC
-compute-node client — so application code contains only entities,
-processors, criteria, and REST controllers.
+in Java or Kotlin. It includes the Cyoda integration — authentication, the
+REST repository layer, and the gRPC compute-node client — so application
+code contains only entities, processors, criteria, and REST controllers.
 
-The template is optional. Compute nodes can be written in any language that
-speaks the [compute-node protocol](/build/client-compute-nodes/), and AI
-coding agents build them directly from `cyoda help`, the
+The template is a convenience: optional scaffolding, not a requirement.
+Compute nodes can be written in any language that speaks the
+[compute-node protocol](/build/client-compute-nodes/), and modern AI coding
+agents need little scaffolding to build them from `cyoda help`, the
 [API reference](/reference/api/), and [Cyoda Skills](/tools/cyoda-skills/).
+
+:::caution[Token endpoint not yet updated]
+The template does not yet use the tenant-scoped token endpoint,
+`POST /api/tenants/{tenant}/oauth/token`, and has no tenant setting. Until it
+is updated it cannot get a token from a cyoda-go instance in JWT mode. See
+[Authenticating applications](/build/authenticating-applications/) for the
+current flow.
+:::
 
 ## Requirements
 
 - Java 21
-- A Cyoda instance and an M2M client (`client_id` and secret). On cyoda-go,
-  see [`cyoda help auth clients`](/help/auth/clients/).
+- A cyoda-go instance and an M2M client (`client_id` and secret) of a
+  tenant. See [Authenticating applications](/build/authenticating-applications/)
+  and [`cyoda help auth clients`](/help/auth/clients/).
 
 ## Get started
 

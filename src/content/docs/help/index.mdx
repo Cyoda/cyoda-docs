@@ -13,10 +13,11 @@ export const topLevelTopics = helpIndex.topics
   .sort((a, b) => a.path[0].localeCompare(b.path[0]));
 
 This section is a static mirror of the cyoda-go binary's help surface
-— the same content `cyoda help …` prints on the CLI and the live
-HTTP help API serves at runtime. It exists for readers who don't have
-a local cyoda-go runtime installed, and for AI agents that need to
-discover and consume cyoda-go's help without running the binary.
+— the same content `cyoda help …` prints on the CLI and a running server
+serves at `GET /api/help` (under `CYODA_CONTEXT_PATH`, default `/api`; no
+authentication). It exists for readers who don't have a local cyoda-go
+runtime installed, and for AI agents that need to discover and consume
+cyoda-go's help without running the binary.
 
 Every rendered page below has a sibling raw-markdown view at
 `<page-url>.md` and a structured JSON descriptor at `<page-url>.json`.
@@ -58,12 +59,15 @@ For a flat view of every topic and subtopic, see
 
 Agents navigate the mirror via three primitives plus a discovery file:
 
-- [`/help/index.json`](/help/index.json) — manifest of every topic
-  with `topic`, `title`, `stability`, `tagline`, `see_also`. The
-  envelope is byte-equivalent to the live API's `GET /help` response.
+- [`/help/index.json`](/help/index.json) — manifest of every topic:
+  `schema`, `version` and, per topic, `topic`, `title`, `stability`,
+  `tagline` and `see_also`, plus a `_url_convention` hint. It is a slimmed
+  copy of the live `GET /api/help` response, which returns every topic's
+  full descriptor, body included; fetch a topic's `.json` for the rest.
 - `/help/<slug>.json` — full topic descriptor including `body`,
-  `sections[]`, `see_also`, `stability`, `actions`, `children`. Same
-  shape as the live API's `GET /help/{topic}` response.
+  `sections[]`, `see_also`, `stability`, `actions`, and `children` where
+  the topic has subtopics. Same shape as the live API's
+  `GET /api/help/{topic}` response.
 - `/help/<slug>.md` — body only, no frontmatter, no chrome.
 - [`/help/versions.json`](/help/versions.json) — version registry.
 
@@ -74,9 +78,10 @@ convention.
 ### URL convention
 
 `cyoda help A B C` ↔ `https://docs.cyoda.net/help/a/b/c/` for the
-rendered page, or `.md`/`.json` for the raw payloads. Manifest topic
-IDs use the live API's dotted form and may be mixed-case
-(`config.database`, `errors.BAD_REQUEST`); replace dots with slashes
-**and lowercase** to build the URL — e.g. `errors.BAD_REQUEST` →
-`/help/errors/bad_request/`.
+rendered page, or `.md`/`.json` for the raw payloads. Topic ids are
+dotted and may be mixed-case (`config.database`, `errors.BAD_REQUEST`);
+the CLI accepts a dotted id as one argument (`cyoda help config.database`)
+and the live API accepts it in the path (`GET /api/help/config.database`).
+To build the mirror URL, replace dots with slashes **and lowercase** —
+e.g. `errors.BAD_REQUEST` → `/help/errors/bad_request/`.
 

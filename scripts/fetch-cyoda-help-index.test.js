@@ -311,20 +311,46 @@ test('HelpJsonBodyMissing: full output requested, but a topic lacks body', async
   fs.rmSync(versionFile);
 });
 
-test('--if-missing: short-circuits when output exists', async () => {
+test('--if-missing: short-circuits when outputs are at the pinned version', async () => {
   const versionFile = tmpVersionFile(TEST_VERSION);
   const outputFile = tmpOutputFile();
-  fs.writeFileSync(outputFile, '{"pinnedVersion":"already-here","topics":[]}');
+  const fullFile = tmpFullOutputFile();
+  const stamp = JSON.stringify({ pinnedVersion: TEST_VERSION, generatedAt: 'already-here', topics: [] });
+  fs.writeFileSync(outputFile, stamp);
+  fs.writeFileSync(fullFile, stamp);
   let fetchCalled = false;
   await run({
     fetch: async () => { fetchCalled = true; throw new Error('should not be called'); },
     versionFilePath: versionFile,
     outputPath: outputFile,
+    fullOutputPath: fullFile,
     ifMissing: true,
   });
   assert.equal(fetchCalled, false);
   // File left untouched
-  assert.equal(JSON.parse(fs.readFileSync(outputFile, 'utf8')).pinnedVersion, 'already-here');
+  assert.equal(JSON.parse(fs.readFileSync(outputFile, 'utf8')).generatedAt, 'already-here');
   fs.rmSync(versionFile);
   fs.rmSync(outputFile);
+  fs.rmSync(fullFile);
+});
+
+test('--if-missing: re-fetches when the output is from another pinned version', async () => {
+  const versionFile = tmpVersionFile(TEST_VERSION);
+  const outputFile = tmpOutputFile();
+  const fullFile = tmpFullOutputFile();
+  const stale = JSON.stringify({ pinnedVersion: '0.0.0-older', topics: [] });
+  fs.writeFileSync(outputFile, stale);
+  fs.writeFileSync(fullFile, stale);
+  let fetchCalled = false;
+  await run({
+    fetch: async () => { fetchCalled = true; throw new Error('stop after the freshness check'); },
+    versionFilePath: versionFile,
+    outputPath: outputFile,
+    fullOutputPath: fullFile,
+    ifMissing: true,
+  }).catch(() => {});
+  assert.equal(fetchCalled, true, 'a stale output must not satisfy --if-missing');
+  fs.rmSync(versionFile);
+  fs.rmSync(outputFile);
+  fs.rmSync(fullFile);
 });

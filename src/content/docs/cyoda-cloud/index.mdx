@@ -1,100 +1,13 @@
 ---
 title: Cyoda Cloud
-description: Managed, isolated cyoda-go environments behind a single control-plane API — coming soon.
+description: Cyoda Cloud is being redesigned from the ground up. Details will be published here.
 sidebar:
   order: 0
 ---
 
-import Badge from '../../../components/Badge.astro';
-import { Aside } from '@astrojs/starlight/components';
+Cyoda Cloud is being redesigned from the ground up. Information about the
+new service will be published here when it is ready.
 
-<Badge variant="purple">Coming soon · In design</Badge>
-
-**Cyoda Cloud is coming.** It is the managed service for running
-systems built on [cyoda-go](https://github.com/Cyoda/cyoda-go):
-managed, isolated cyoda-go environments behind a single control-plane
-API — provisioning, environment lifecycle, credential brokering for
-compute nodes, deployment, and per-environment observability.
-
-The data-plane surface is identical to what you run locally. Entity
-models, workflow configuration, and compute-node code carry over
-without modification; the control plane adds the cloud-only concerns
-and nothing else.
-
-We are currently at the design stage of the new architecture. This
-section documents the design and the contracts it will honor; details
-will change as the design settles. See
-[Status and roadmap](./status-and-roadmap/) for where things stand.
-
-<Aside type="tip" title="Want it sooner?">
-⭐ Star [cyoda-cloud-cli](https://github.com/Cyoda/cyoda-cloud-cli)
-— every star is a vote that shapes our prioritisation — and
-[join the waitlist](https://cyoda.com/cloud) to get early access when
-the doors open.
-</Aside>
-
-## Tiers
-
-| Tier | Storage | Intended use |
-| --- | --- | --- |
-| Local (OSS, free) | SQLite / Postgres | Development |
-| Cloud — shared | Isolated Postgres per environment | Team access, integration, early production |
-| Cloud — dedicated | Dedicated Postgres | Production with stricter isolation requirements |
-| Cloud — enterprise | `cyoda-go-cassandra` (commercial license) | High-volume production |
-
-Moving between tiers is an infrastructure change; application code and
-data models are unaffected.
-
-cyoda-go is Apache-2.0: the local tier is the full engine, not a
-feature-limited edition, and Cyoda Cloud is a service, not a license
-unlock. Only the enterprise storage engine carries a commercial
-license.
-
-## Architecture
-
-Per environment, the data plane consists of:
-
-- **A managed cyoda-go core** — the official engine image, operated by
-  Cyoda. It exposes the environment's API and acts as the gRPC server
-  for compute nodes.
-- **Isolated storage** — a Postgres schema per environment, with
-  dedicated credentials. Cross-tenant access is excluded at the
-  database layer, not by application logic.
-- **Your compute nodes** — your code, your image, built and shipped by
-  your own pipeline. A node dials into the core over a persistent
-  bidirectional gRPC stream and receives processor and criteria work
-  pushed down that stream — the same
-  [client compute node](/build/client-compute-nodes/) contract as a
-  local instance. Because the node dials out, it can run on cloud
-  infrastructure, in CI, or on a workstation joined to a cloud core.
-
-Above the data plane sits a single control plane covering environment
-lifecycle, provisioning, credential brokering, deployment triggers, and
-per-environment observability. It never holds your application source:
-your pipeline builds the compute-node image, pushes it to an isolated
-per-environment registry under a federated deploy identity, and
-triggers a rolling update.
-
-## Control-plane clients
-
-One versioned control-plane API; two peer clients:
-
-- **A dashboard** — workflow visualisation, live entities, audit
-  timeline, logs, system health.
-- **[cyoda-cloud-cli](https://github.com/Cyoda/cyoda-cloud-cli)** —
-  the scriptable client for developers and coding agents: data as JSON
-  on stdout, progress and errors on stderr, stable documented exit
-  codes, idempotency keys on every mutating call, and a non-interactive
-  variant of every flow.
-
-Neither has private endpoints: anything the dashboard can do, the API
-can do — and therefore the CLI, and therefore an agent driving it.
-
-## In this section
-
-- [Provisioning](./provisioning/) — how environments will be created
-  and managed.
-- [Identity and entitlements](./identity-and-entitlements/) — the
-  identity and subscription design we are working toward.
-- [Status and roadmap](./status-and-roadmap/) — where the rebuild
-  stands.
+In the meantime, run [cyoda-go](https://github.com/Cyoda/cyoda-go)
+yourself. [Run](/run/) covers the desktop binary, Docker and Kubernetes,
+and [Build](/build/) covers developing applications against it.

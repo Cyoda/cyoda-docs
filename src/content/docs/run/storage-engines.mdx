@@ -1,51 +1,50 @@
 ---
 title: Storage engines
-description: Five ways to run Cyoda — one application contract.
+description: The storage engines cyoda-go runs on — in-memory, SQLite and PostgreSQL — and the one application contract they share.
 sidebar:
   order: 5
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import FromTheBinary from '../../../components/FromTheBinary.astro';
 
-Cyoda runs on five storage configurations: four pluggable engines that
-ship with `cyoda-go` (in-memory, SQLite, PostgreSQL, and a commercial
-Cassandra plugin) plus the classic Kotlin runtime that has powered Cyoda
-Cloud in production since 2017. They differ in durability, fault
-tolerance, and operational footprint — but the **application contract
-is identical across all five.** Code written against one runs unchanged
-against any other.
+<FromTheBinary topic="config database" />
+
+cyoda-go ships with three storage engines: in-memory, SQLite and PostgreSQL.
+They differ in durability, fault tolerance and operational footprint, but the
+**application contract is identical across all of them.** Code written against
+one runs unchanged against any other. `CYODA_STORAGE_BACKEND` selects the
+engine at start (`memory`, `sqlite` or `postgres`).
+
+Commercial storage backends are also available; for those, contact Cyoda.
 
 ## One application contract
 
-Every Cyoda runtime offers the same isolation contract: **Snapshot
-Isolation with First-Committer-Wins on entity-level conflicts** (SI+FCW).
+Every engine offers the same isolation contract: **Snapshot Isolation with
+First-Committer-Wins on entity-level conflicts** (SI+FCW).
 
 What that gets you:
 
-- **Snapshot reads** — a transaction sees a consistent point-in-time
-  view of the data, regardless of concurrent writes.
+- **Snapshot reads** — a transaction sees a consistent view of the data as
+  of its start, plus its own writes, regardless of concurrent writes.
 - **Entity-level conflict detection at commit** — if another transaction
-  modified an entity you read or wrote, your transaction aborts at
-  commit and you retry.
-- **First-committer-wins on write/write conflicts** — concurrent updates
-  to the same entity resolve deterministically; the second commit
-  aborts.
+  committed a change to an entity you read or wrote, your transaction aborts
+  at commit with a retryable `409 CONFLICT`.
+- **First-committer-wins on write/write conflicts** — concurrent updates to
+  the same entity resolve deterministically; the second commit aborts.
 
 What it does **not** give you:
 
-- **No phantom or predicate protection.** A transaction that counts
-  rows matching a predicate cannot rely on the count being stable
-  across the transaction's lifetime. Workflow logic that needs
-  predicate-stable counts has to be expressed as an explicit
-  serialization point — see the operational rule for workflow authors
-  in [Concepts → Entities and lifecycle](/concepts/entities-and-lifecycle/).
+- **No phantom or predicate protection.** A transaction that counts entities
+  matching a predicate cannot rely on the count being stable across the
+  transaction's lifetime. Workflow logic that needs predicate-stable counts has
+  to be expressed as an explicit serialization point — see the operational
+  rule for workflow authors in
+  [Concepts → Entities and lifecycle](/concepts/entities-and-lifecycle/).
 
-The contract is delivered identically by every engine. cyoda-go's
-in-memory and SQLite plugins implement SI+FCW in process. The
-PostgreSQL plugin layers it on PostgreSQL `REPEATABLE READ`. The
-Cassandra plugin and the classic CPL runtime implement it against
-Cassandra primitives. The application has no way to tell which engine
-it is running against — and that is the point.
+The in-memory and SQLite engines implement SI+FCW in process. The PostgreSQL
+engine runs every transaction under PostgreSQL `REPEATABLE READ` and adds
+first-committer-wins validation of the transaction's read set at commit.
 
 **A successful write is visible everywhere.** A `2xx` write response means that
 the data is visible to every later read on every node. A caller can write and
@@ -60,59 +59,87 @@ Every engine also agrees on these details:
 - Text comparisons order by byte value.
 - A client disconnect stops the in-flight per-item work.
 
+### Commit and consistency semantics
+
+These hold on every engine:
+
+- **A write is dated at its transaction's commit.** Every entity a transaction
+  writes carries the same instant, taken immediately before the commit, so a
+  point-in-time read sees all of a transaction's writes or none of them. A
+  date sent on a write is ignored. Commit stamps strictly increase and never
+  go back.
+- **One version per entity per transaction.** However often a transaction
+  writes an entity, it records one version of it, and the change history has
+  one entry for that transaction.
+- **Unique keys are checked at commit**, on the entities as the transaction
+  leaves them, with the unique-key definitions of the stored model. Two
+  entities of one transaction can swap key values; a duplicate refuses the
+  commit with `409 UNIQUE_VIOLATION`.
+- **A conditional delete is atomic.** Without `transactionSize` it is one
+  transaction: any failure to delete one entity fails the whole request and
+  deletes nothing. With `transactionSize`, each batch is atomic.
+- **The consistency time fences point-in-time reads.**
+  `GET /api/entity/consistency-time` returns the instant up to which no save of
+  your tenant can still land. A read at or before it gives the same answer for
+  ever; a `pointInTime` later than it is refused with
+  `400 POINT_IN_TIME_AFTER_CONSISTENCY_TIME`. It covers every save confirmed
+  on any node of a cluster, and it never goes back, also across a restart.
+
+See [Consistent reads](/build/consistent-reads/) for how to use the
+consistency time, and [`cyoda help crud`](/help/crud/) (POINT-IN-TIME
+SEMANTICS) for the full rules.
+
 ## At a glance
 
-| Engine | Durability | Fault tolerance | Scale envelope | Footprint | Distribution | Best-fit scope |
-|---|---|---|---|---|---|---|
-| **In-memory** | Ephemeral | None — restart loses data | Bounded by host RAM | Single binary, no deps | OSS — ships with cyoda-go | Tests, digital-twin sims |
-| **SQLite** | Durable (single file) | Single-process; survives restart, not disk loss | Single node, disk-bound | Single binary, no deps | OSS — ships with cyoda-go | Desktop, edge, single-node prod |
-| **PostgreSQL** | Durable, replicated via PostgreSQL | HA via PostgreSQL replication & failover; mid-transaction node loss returns `TRANSACTION_NODE_UNAVAILABLE` (client retries) | Multi-node stateless cluster; writes bounded by single PG primary | cyoda-go nodes + PostgreSQL 14+ (managed or self-hosted) | OSS — ships with cyoda-go | Multi-node production; audit / compliance |
-| **Cassandra** | Durable, replicated via Cassandra | Cluster-tolerant; transactions survive mid-flight node loss | Horizontal write scale-out, multi-cluster | cyoda-go nodes + Cassandra + Redpanda | Commercial — Enterprise edition or via Cyoda Cloud | Write-heavy scale-out; HA without retry-on-node-loss |
-| **CPL / Classic** | Durable, replicated via Cassandra | Production-hardened since 2017; Cassandra-backed HA | Horizontal scale-out (Cassandra-backed); managed by Cyoda | None on your side | Managed service — Cyoda Cloud | Consume Cyoda as a service |
+| Engine | Durability | Fault tolerance | Scale envelope | Footprint | Best-fit scope |
+|---|---|---|---|---|---|
+| **In-memory** | Ephemeral | None — restart loses data | Bounded by host RAM | Single binary, no dependencies | Tests, digital-twin simulations |
+| **SQLite** | Durable (single file) | Single process; survives restart, not disk loss | Single node, disk-bound | Single binary, no dependencies | Desktop, edge, single-node production |
+| **PostgreSQL** | Durable, replicated by PostgreSQL | HA through PostgreSQL replication and failover; a transaction whose node is lost fails, and the client retries | Multi-node stateless cluster; writes bounded by the PostgreSQL primary | cyoda-go nodes + PostgreSQL 14+ (managed or self-hosted) | Multi-node production; audit and compliance |
 
-All five share the same SI+FCW application contract. *Distribution*
-describes how you obtain the engine — open source in the cyoda-go repo,
-commercial license, or managed service — not uptime or fault tolerance.
+All three ship with cyoda-go under the Apache 2.0 license.
 
 ## In-memory
 
-The in-memory plugin keeps all entity state in process memory.
-Transactions complete in microseconds; there are no I/O paths and no
-external dependencies. State is lost when the process exits.
+The in-memory engine keeps all entity state in process memory. Transactions
+complete in microseconds; there are no I/O paths and no external
+dependencies. State is lost when the process exits.
 
 It is the right choice for tests and for digital-twin simulations where
 durability is delegated to a snapshot mechanism elsewhere. It is **not**
 appropriate for any deployment where data must survive a restart.
 
-A single process owns the store; there is no way to share in-memory
-state across processes. Memory consumption is bounded by host RAM.
+A single process owns the store; there is no way to share in-memory state
+across processes. Memory consumption is bounded by host RAM.
 
 ## SQLite
 
-The SQLite plugin gives you durable single-node storage with the same
-zero-dependency footprint as in-memory: a single `cyoda-go` binary, a
-single database file, no other moving parts. The driver is a pure-Go
-WASM build of SQLite — no CGO, clean cross-compilation.
+The SQLite engine gives you durable single-node storage with the same
+zero-dependency footprint as in-memory: a single `cyoda` binary, a single
+database file, no other moving parts. The driver is a pure-Go WASM build of
+SQLite — no CGO, clean cross-compilation.
 
-SQLite provides only database-level write locking; entity-level
-conflict detection (SI+FCW) is layered on top by `cyoda-go`. The
-running process holds an exclusive `flock` on the database file for its
-entire lifetime, so a second `cyoda-go` against the same file fails
-fast at startup with a clear error. Two processes sharing a file would
-have independent SI+FCW state and silently corrupt each other.
+SQLite provides only database-level write locking; entity-level conflict
+detection (SI+FCW) is layered on top by cyoda-go. The running process holds an
+exclusive `flock` on the database file for its entire lifetime, so a second
+process against the same file fails fast at startup with a clear error. Two
+processes sharing a file would have independent SI+FCW state and silently
+corrupt each other.
 
 Best-fit deployments: desktop applications, edge devices, containerised
-single-node production. The combination of "must survive restart" and
-"single process is enough" lands here.
+single-node production. The combination of "must survive restart" and "single
+process is enough" lands here.
 
-**Not** suitable for NFS-mounted database files (SQLite itself is
-unreliable on NFS), nor for any deployment that needs more than one
-`cyoda-go` process against the same data. If either of those applies,
-move to PostgreSQL.
+**Not** suitable for NFS-mounted database files (SQLite itself is unreliable on
+NFS), nor for any deployment that needs more than one cyoda-go process against
+the same data. If either of those applies, move to PostgreSQL.
+
+SQLite migrations run when the node opens the database. `cyoda migrate` is a
+no-op on SQLite.
 
 ### Size the reader pool against your memory limit
 
-The SQLite plugin opens a dedicated pool of read connections, so a long scan
+The SQLite engine opens a dedicated pool of read connections, so a long scan
 does not block concurrent writes. `CYODA_SQLITE_READER_POOL_SIZE` sets the pool
 size. It defaults to `GOMAXPROCS`, limited to the range 4 to 8.
 
@@ -122,33 +149,68 @@ Plan for the memory cost. `CYODA_SQLITE_CACHE_SIZE` (default `64000` KiB) is
 values, that is approximately 562 MiB.
 
 `GOMAXPROCS` follows the CPU quota, and it does not read the memory limit. In a
-container with many cores and little memory, lower the pool size, the cache
-size, or both.
+container with many cores and little memory, lower the pool size rather than
+the cache size, which would shrink the writer's cache as well.
 
 ## PostgreSQL
 
-The PostgreSQL plugin is `cyoda-go`'s production multi-node tier. A
-small cluster of stateless `cyoda-go` nodes — typical deployments run a
-handful — sits behind a load balancer with PostgreSQL as the only
-stateful dependency. Cluster discovery is gossip-based (HashiCorp
-memberlist, embedded, pure Go); there is no ZooKeeper, etcd, or Kafka
-to operate.
+The PostgreSQL engine is cyoda-go's production multi-node tier. A small
+cluster of stateless cyoda-go nodes sits behind a load balancer with
+PostgreSQL as the only stateful dependency. Cluster discovery is gossip-based
+(HashiCorp `memberlist`, embedded); there is no ZooKeeper, etcd or Kafka to
+operate. See [Cluster operations](/run/cluster-operations/).
 
-PostgreSQL 14 or later is required. The plugin works with any managed
-PostgreSQL platform — RDS, Cloud SQL, Azure Database, Supabase, Neon,
-Aiven — or with self-hosted PostgreSQL. SI+FCW is implemented as
-PostgreSQL `REPEATABLE READ` plus an application-layer first-committer
-validation at commit time. Tenant isolation is enforced via PostgreSQL
-Row-Level Security as defense-in-depth: even an application-layer bug
-in tenant scoping cannot leak data across tenants.
+PostgreSQL 14 or later is required. The engine works with managed PostgreSQL
+platforms — RDS, Cloud SQL, Azure Database, Supabase, Neon, Aiven — or with
+self-hosted PostgreSQL. Use the platform's direct-connection endpoint: a
+PgBouncer in transaction-pooling mode (Supabase port 6543, Neon's pooled
+endpoint) breaks the driver's prepared-statement cache.
 
-Write throughput is bounded by the single PostgreSQL primary's write
-capacity. The cluster scales out for connection capacity and read
-fan-out, not for writes against a single PG primary.
+Write throughput is bounded by the single PostgreSQL primary. The cluster
+scales out for connection capacity and read fan-out, not for writes. Read
+replicas are not used.
 
-### Ceilings, saturation, and the upgrade window
+**Tenant isolation** is the `tenant_id` predicate that every statement
+carries. The migrations create row-level security policies, but they take no
+effect: cyoda-go connects as the owner of its tables, and the policies are not
+forced. Running cyoda-go as a role that does not own the tables, or forcing
+row-level security, is not supported.
 
-The plugin sets five configurable ceilings on the database side. All five are
+**A transaction belongs to the node that opened it.** Its PostgreSQL
+transaction lives on one connection of that node, and requests for it from
+other nodes are proxied there. If that node dies mid-transaction, PostgreSQL
+rolls the transaction back when the connection closes; the operation that
+owned it fails and the client retries from scratch. A request that could not
+reach the owner answers `503 TRANSACTION_NODE_UNAVAILABLE`. This is what lets
+the engine run without a consensus protocol.
+
+### Connection pools
+
+Each node opens up to four PostgreSQL pools, so that entity transactions
+cannot starve the scheduler or the model store:
+
+| Pool | Size variable | Default | Used for |
+|---|---|---|---|
+| `main` | `CYODA_POSTGRES_MAX_CONNS` (and `CYODA_POSTGRES_MIN_CONNS`, default `5`) | `25` | Entity transactions and reads, search, `GET /scheduled-tasks` |
+| `scheduler` | `CYODA_POSTGRES_SCHEDULER_CONNS` (at least `2`) | `10` | Scheduled-task claims and bookkeeping, the async-search heartbeat and claim |
+| `heartbeat` | — | `1` | The scheduler heartbeat |
+| `model` | `CYODA_POSTGRES_MODEL_CONNS` (at least `2`) | `8` | Model reads, schema extensions (at most half the pool), model administration |
+
+That is up to **44 connections per node** at the defaults. Multiply by the
+number of nodes and check the total against PostgreSQL's `max_connections`;
+see [Cluster operations](/run/cluster-operations/#postgresql-connection-budget).
+An invalid scheduler or model pool size stops the server at startup.
+
+`cyoda.storage.pool.connections` reports every pool, labelled by `pool`
+(`main`, `scheduler`, `heartbeat`, `model`). The other pool instruments,
+exported as `cyoda_storage_pool_*` at `/metrics` and always on, cover the main
+pool. `cyoda.storage.pool.empty_acquire_wait`, the time callers waited on an
+empty main pool, is the saturation signal to alarm on. See
+[`cyoda help telemetry`](/help/telemetry/).
+
+### Ceilings and saturation
+
+The engine sets five configurable ceilings on the database side. All five are
 on by default. Each one takes a Go duration. Set a value to `0` to disable that
 limit. A malformed value stops the server at startup.
 
@@ -156,79 +218,52 @@ limit. A malformed value stops the server at startup.
 |---|---|---|
 | `CYODA_POSTGRES_STATEMENT_TIMEOUT` | `5m` | Any single statement |
 | `CYODA_POSTGRES_IDLE_IN_TX_TIMEOUT` | `5m` | Idle gap inside an open transaction |
-| `CYODA_POSTGRES_ACQUIRE_TIMEOUT` | `10s` | Waiting for a pooled connection |
-| `CYODA_POSTGRES_MIGRATE_LOCK_TIMEOUT` | `5m` | Migration advisory lock |
+| `CYODA_POSTGRES_ACQUIRE_TIMEOUT` | `10s` | Waiting for a pooled connection when opening a transaction, or for a second connection inside one |
+| `CYODA_POSTGRES_MIGRATE_LOCK_TIMEOUT` | `5m` | Lock waits on the migration connection |
 | `CYODA_POSTGRES_SEARCH_STATEMENT_TIMEOUT` | `30m` | Async-search statements |
 
-The database aborts the transaction of a workflow processor whose
-`responseTimeoutMs` is longer than the idle-in-transaction ceiling. The processor default of 30
-seconds is well below the 5-minute ceiling, so this affects long callouts only.
+A compute-node callout holds its transaction's connection idle while it
+waits, so the idle-in-transaction ceiling must clear the longest callout.
+`responseTimeoutMs` is capped at `CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS`
+(default `60s`), and the documented relation is
+`(CYODA_RETRY_FIXED_NUM_RETRIES + 1) × CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS +
+CYODA_DISPATCH_WAIT_TIMEOUT + CYODA_CALLOUT_HANDOVER_ALLOWANCE` under
+`CYODA_POSTGRES_IDLE_IN_TX_TIMEOUT`: 275 seconds against 5 minutes at the
+defaults. The server does not enforce it, so keep it when you raise any of
+those values. The ceiling applies per idle gap, not per transaction.
 
 Three conditions return a retryable **`503 STORAGE_UNAVAILABLE`**: the pool
 could not supply a connection, the idle ceiling aborted the transaction, and
-the connection went away. Seven `cyoda_storage_pool_*` metrics report pool
-saturation at `/metrics`. They are always on.
+the connection went away. See
+[`cyoda help errors STORAGE_UNAVAILABLE`](/help/errors/storage_unavailable/).
 
-<Aside type="caution" title="Migration 000008 blocks writers to the entities table">
+### Migrations and maintenance windows
 
-Migration `000008` adds an index to the `entities` table with a plain
-`CREATE INDEX`. Writers to `entities` are blocked while the index builds.
+Migrations are embedded in the binary. With `CYODA_POSTGRES_AUTO_MIGRATE=true`
+(the default) a node applies them at start; nodes starting together take turns
+under an advisory lock. `cyoda migrate` applies them as a separate step, which
+is how the Helm chart runs them. A database newer than the binary is refused,
+and a migration left dirty by a failure stops startup until it is recovered by
+hand (see [`cyoda help cli migrate`](/help/cli/migrate/)).
 
-On a populated deployment, plan a maintenance window sized to the row count of
-the `entities` table.
+Some migrations build indexes with a plain `CREATE INDEX` or alter a table
+under a lock, and block traffic to those tables while they run. On a populated
+database, plan a maintenance window for them:
 
-</Aside>
+| Migration | Blocks | Time grows with |
+|---|---|---|
+| `000008` | Writers to `entities` | Rows in `entities` |
+| `000011` | Writers to `entities` for the index build; readers of `entities` for a moment at the swap | Rows in `entities` |
+| `000012` | Writers to `entities` and `entity_versions` (readers are unaffected) | Rows in `entity_versions` and `entities` (full backfill and foreign-key validation) |
+| `000013` | Writers to `sm_audit_events`, which includes every committing transaction | Rows in `sm_audit_events` |
+| `000014` | Readers and writers of `scheduled_tasks` (table rewrite and five indexes) | Rows in `scheduled_tasks` (one per armed timer) |
 
-The plugin makes one explicit, accepted trade-off: each transaction is
-pinned to the `cyoda-go` node that opened it. If that node dies
-mid-transaction, PostgreSQL rolls back the connection and the client
-receives `TRANSACTION_NODE_UNAVAILABLE` and must retry from scratch.
-This trade-off is what lets the plugin run without Paxos, Raft, or
-ZooKeeper. For deployments that cannot tolerate this failure mode, the
-Cassandra plugin removes it.
-
-## Cassandra (commercial)
-
-The Cassandra plugin is the answer for write volumes that exceed what a
-single PostgreSQL primary can absorb, and for high-availability
-deployments that cannot tolerate `TRANSACTION_NODE_UNAVAILABLE`.
-Transactions are coordinated within the plugin itself rather than
-pinned to an owning `cyoda-go` node, so a transaction survives the
-mid-flight loss of any one node. The store scales horizontally without
-a single-primary bottleneck and supports multi-DC topologies.
-
-The operational footprint is larger than the PostgreSQL plugin: a
-Cassandra cluster, a Redpanda message broker, and the `cyoda-go` nodes.
-This is the same storage lineage that has run Cyoda Cloud in production
-since 2017 — operational provenance, not a sales pitch.
-
-There is one shape to watch for. The plugin is designed for entities
-updated at moderate frequency — tens to low hundreds of versions over
-an entity's lifetime. A single entity updated thousands of times per
-day will let its version chain, partition size, and checkpoint cost
-grow unbounded. The fix is a modelling one: represent the high-churn
-state as a linked list of entities, where each "version" is its own
-entity (a node in the list) rather than a new revision of one
-long-lived entity.
-
-The Cassandra plugin is available commercially — as the **Enterprise**
-edition for self-hosted deployments and, ahead, as the enterprise
-storage tier of **Cyoda Cloud**. For sizing or licensing, contact
-Cyoda.
-
-## CPL / Classic
-
-The classic Kotlin/Java runtime has powered Cyoda Cloud in production
-with clients since 2017, on a Cassandra storage backend. `cyoda-go` is
-an adaptation of the EDBMS design that emerged from CPL — same
-contract, same data model, same workflow semantics, different host
-language and operational shape.
-
-CPL today is an enterprise engagement: the runtime is operated by
-Cyoda for established clients. The next generation of **Cyoda Cloud**
-— the self-service managed home for cyoda-go applications — is being
-built now; see [Cyoda Cloud](/cyoda-cloud/) for the design and
-roadmap.
+Size one window to cover `000011` through `000014` together. `000016` reads
+`entity_versions` once to set the starting consistency time; it blocks no
+writer. For a large database, stop the cluster and run
+`cyoda migrate --timeout <duration>` once, rather than relying on
+auto-migration at start, which runs within `CYODA_STARTUP_TIMEOUT` (default
+`30s`). See [Cluster operations](/run/cluster-operations/#upgrades).
 
 ## Choosing an engine
 
@@ -236,30 +271,17 @@ Match the engine to the operational shape you can sustain:
 
 - **Local development and tests** — start on **in-memory**. Microsecond
   transactions, no setup, no cleanup.
-- **Desktop, edge, single-node production** — **SQLite**. Durable,
-  embedded, single binary.
+- **Desktop, edge, single-node production** — **SQLite**. Durable, embedded,
+  single binary.
 - **Multi-node self-hosted production**, including audit and compliance
-  workloads — **PostgreSQL**. Managed PG keeps the operational footprint
-  small.
-- **Write throughput exceeds single-PG-primary capacity, or HA without
-  `TRANSACTION_NODE_UNAVAILABLE`** — **Cassandra** (Enterprise edition).
-- **Don't want to run any of it** — **Cyoda Cloud**.
+  workloads — **PostgreSQL**. Managed PostgreSQL keeps the operational
+  footprint small.
+- **Write throughput beyond a single PostgreSQL primary** — a commercial
+  backend; contact Cyoda.
 
-### When to switch
-
-The progression is not a forced upgrade path; some deployments stay on
-SQLite indefinitely and that is the right answer for them. Switch when:
-
-- **Write throughput approaches the single-PG-primary ceiling** in
-  PostgreSQL deployments, with no managed-PG headroom left or the
-  upgrade exceeding the cost of moving — consider Cassandra.
-- **Mid-transaction node loss is unacceptable** in your availability
-  budget — consider Cassandra; the plugin coordinates transactions at
-  the cluster level rather than pinning them to a single node.
-- **Operational footprint outweighs the benefit of self-hosting** —
-  consider Cyoda Cloud.
-
-The application contract does not change when you move. The
+The progression is not a forced upgrade path; some deployments stay on SQLite
+indefinitely, and that is the right answer for them. The application contract
+does not change when you move. The
 [growth-path framing in Concepts](/concepts/digital-twins-and-growth-path/)
 covers the decision in narrative form.
 
@@ -268,6 +290,7 @@ covers the decision in narrative form.
 - **Concepts** — [What is Cyoda](/concepts/what-is-cyoda/),
   [Entities and lifecycle](/concepts/entities-and-lifecycle/),
   [Digital twins and the growth path](/concepts/digital-twins-and-growth-path/).
+- **Run** — [Cluster operations](/run/cluster-operations/) for multi-node
+  PostgreSQL deployments, [Kubernetes](/run/kubernetes/) for the Helm chart.
 - **Reference** — [Configuration](/reference/configuration/) for per-engine
-  environment variables, [CLI](/reference/cli/) for `cyoda-go` commands.
-- **Cyoda Cloud** — [hosted service overview](/cyoda-cloud/).
+  environment variables, [CLI](/reference/cli/) for `cyoda` commands.

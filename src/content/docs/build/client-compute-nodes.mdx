@@ -1,47 +1,52 @@
 ---
 title: "Client compute nodes"
-description: "Patterns for processor and criteria services — implementation, registration, and lifecycle."
+description: "Write a compute node: the gRPC stream, the answers it sends, the identity it receives and the callbacks it makes."
 sidebar:
   order: 40
 ---
 
 import FromTheBinary from '../../../components/FromTheBinary.astro';
+import { Aside } from '@astrojs/starlight/components';
 
 <FromTheBinary topic="grpc" />
 
 # 1. Architecture Overview
 
-A **calculation member** is an external gRPC client that participates in entity workflow processing on the Cyoda platform. The platform delegates work to your client over a persistent bidirectional gRPC stream, and your client returns results on the same stream. For the rationale behind preferring gRPC over HTTP for compute nodes, see [APIs and surfaces](/concepts/apis-and-surfaces/).
+A **compute node** (the protocol calls it a *calculation member*) is an external gRPC client that runs your code inside entity workflows. The platform delegates work to it over a persistent bidirectional gRPC stream, and the compute node returns results on the same stream. For the rationale behind preferring gRPC over HTTP for compute nodes, see [APIs and surfaces](/concepts/apis-and-surfaces/).
 
 ```
 ┌──────────────────────┐         gRPC (bidirectional stream)         ┌─────────────────────────┐
-│   Cyoda Platform     │ ◄──────────────────────────────────────────►│  Your Calculation       │
-│                      │    CloudEvent (Protobuf, JSON payload)      │  Member (Client)        │
+│   Cyoda Platform     │ ◄──────────────────────────────────────────►│  Your Compute Node      │
+│                      │    CloudEvent (Protobuf, JSON payload)      │  (Calculation Member)   │
 │  ┌────────────────┐  │                                             │                         │
 │  │ Workflow Engine│  │  1. Client opens stream, sends Join         │  ┌───────────────────┐  │
 │  │                │  │  2. Server responds with Greet              │  │ Business Logic    │  │
-│  │  - Processors  │──┼──3. Server pushes Processing/Criteria reqs──┼──│                   │  │
-│  │  - Criteria    │  │  4. Client returns responses                │  │ - Data transforms │  │
-│  │                │  │  5. Keep-alive heartbeats (bidirectional)   │  │ - Criteria checks │  │
+│  │  - Processors  │──┼──3. Server pushes callout requests──────────┼──│                   │  │
+│  │  - Criteria    │  │     (processor, criteria, function)         │  │ - Data transforms │  │
+│  │  - Schedules   │  │  4. Client returns responses                │  │ - Criteria checks │  │
+│  │                │  │  5. Server probes liveness; client acks     │  │ - Fire times      │  │
 │  └────────────────┘  │                                             │  └───────────────────┘  │
 └──────────────────────┘                                             └─────────────────────────┘
 ```
 
-Three types of work can be delegated:
+Each piece of work sent to a compute node is a **callout**. There are three kinds:
 
 | Use Case | Description | Request Type | Response Type |
 |---|---|---|---|
-| **Processing** | Perform actions, such as transforming entity data during a workflow transition, performing CRUD ops on other entities, running reports, interacting with other systems, etc. | `EntityProcessorCalculationRequest` | `EntityProcessorCalculationResponse` |
-| **Criteria Evaluation** | Evaluate a boolean condition (e.g., "should this transition fire?") | `EntityCriteriaCalculationRequest` | `EntityCriteriaCalculationResponse` |
-| **Function** | Compute and return a declared typed value without mutating anything — currently the firing time of a [scheduled transition](/build/workflows-and-processors/#scheduled-transitions). | `EntityFunctionCalculationRequest` | `EntityFunctionCalculationResponse` |
+| **Processing** | Perform actions during a workflow transition: compute new entity data, read or write *other* entities, call other systems. | `EntityProcessorCalculationRequest` | `EntityProcessorCalculationResponse` |
+| **Criteria Evaluation** | Evaluate a boolean condition (for example, "should this transition fire?"). | `EntityCriteriaCalculationRequest` | `EntityCriteriaCalculationResponse` |
+| **Function** | Compute and return a declared typed value without side effects. Currently the firing time of a [scheduled transition](/build/scheduled-transitions/). | `EntityFunctionCalculationRequest` | `EntityFunctionCalculationResponse` |
+
+A compute node may also call back into the platform while it handles a callout, over HTTP or gRPC. Those requests are **callbacks**; see [Section 10.3.1](#1031-transaction-joined-callbacks).
 
 ## 1.1 Protocol Summary
 
-- **Transport**: gRPC bidirectional streaming via `CloudEventsService.startStreaming`
-- **Message format**: [CNCF CloudEvents](https://cloudevents.io/) Protobuf envelope with JSON `text_data` payload
-- **Authentication**: Bearer JWT token in gRPC `Authorization` metadata header
-- **Auth context propagation**: The platform attaches [CloudEvents Auth Context extension](https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/authcontext.md) attributes to processor and criteria requests, identifying the principal whose action triggered the workflow (see [Section 9](#9-auth-context-on-incoming-requests))
-- **Serialization**: All payloads are JSON-serialized inside CloudEvent `text_data` (not binary protobuf)
+- **Transport**: gRPC bidirectional streaming via `CloudEventsService.startStreaming`, on the gRPC port (default `9090`).
+- **Message format**: [CNCF CloudEvents](https://cloudevents.io/) Protobuf envelope with a JSON `text_data` payload.
+- **Authentication**: the compute node's own `client_credentials` token as `authorization: Bearer <token>` gRPC metadata. See [Section 2.2](#22-authentication-token).
+- **Identity on callouts**: every callout carries the principal the work is *attributed* to and the principal that *executes* it, as CloudEvent attributes. See [Section 9](#9-auth-context-on-incoming-requests).
+- **Platform time on callouts**: every callout carries the platform clock's time in the standard CloudEvent `time` attribute.
+- **Serialization**: all payloads are JSON inside CloudEvent `text_data`, not binary protobuf.
 
 ---
 
@@ -49,16 +54,20 @@ Three types of work can be delegated:
 
 ## 2.1 Proto Definitions
 
-Your client needs the following proto files to generate gRPC stubs:
+Your client needs two proto files to generate gRPC stubs:
 
-- **`cloudevents.proto`** — The standard CloudEvents Protobuf message definition (package `io.cloudevents.v1`)
-- **`cyoda-cloud-api.proto`** — The Cyoda service definition (package `org.cyoda.cloud.api.grpc`)
+- **`cloudevents.proto`**: the standard CloudEvents Protobuf message definition (package `io.cloudevents.v1`).
+- **`cyoda-cloud-api.proto`**: the Cyoda service definition (package `org.cyoda.cloud.api.grpc`).
 
-The service definition:
+`cyoda help grpc proto` prints both, separated by comments. Save them as `proto/cyoda/cyoda-cloud-api.proto` and `proto/cloudevents/cloudevents.proto`. The server does not serve gRPC reflection, so tools such as `grpcurl` need the files on disk.
+
+The service definition for the compute-node stream:
 
 ```protobuf
 service CloudEventsService {
   rpc startStreaming(stream io.cloudevents.v1.CloudEvent) returns (stream io.cloudevents.v1.CloudEvent);
+  // entityManage, entityManageCollection, entityModelManage,
+  // entitySearch and entitySearchCollection are also served (see cyoda help grpc)
 }
 ```
 
@@ -81,47 +90,71 @@ message CloudEvent {
 }
 ```
 
-## 2.2 JWT Authentication Token
+Go compute nodes can import the generated types instead of generating their own: `github.com/cyoda/cyoda-go/api/grpc/cyoda` (the service) and `github.com/cyoda/cyoda-go/api/grpc/cloudevents` (the envelope).
 
-Obtain a valid JWT Bearer token from the Cyoda IAM system (OAuth 2.0 client credentials flow). The token must contain:
-- A valid `caas_org_id` claim (your legal entity ID)
-- Valid user roles
+## 2.2 Authentication Token
 
-The token is validated on every stream establishment. If the token expires during an active stream, the stream remains valid — re-authentication occurs only when a new stream is opened.
+A compute node opens its stream with **its own client's token**: an access token from the `client_credentials` grant, issued to an M2M client of your tenant by `POST /api/tenants/{tenant}/oauth/token`. The token is a service principal holding `ROLE_M2M`. How to create the client and fetch its token is set out in [Authenticating applications](/build/authenticating-applications/).
+
+Give each compute-node service a plain client of its own, shared by all its replicas, so that it can be rotated or revoked alone and so that the executor recorded on every change names the compute node.
+
+Every other kind of token is refused with gRPC `PermissionDenied`:
+
+- an on-behalf-of token from the token exchange (it states a user, not a compute node);
+- a token from `cyoda token` (the platform operator's);
+- any token without `ROLE_M2M`.
+
+**The stream outlives its token.** The token is checked when the stream opens. Its expiry does not end the stream, and the compute node does not reconnect when it fetches a new token. Instead, the server reads the stream's client from its store when the stream opens and every 60 seconds after. When the client has been deleted, or its secret has been reset since the token was issued, the stream is refused, or closed within a minute, with `Unauthenticated`.
+
+**Callbacks use a current token.** Each callback the compute node makes carries its client's current `client_credentials` token. Cache the token and fetch a new one when less than 60 seconds of its life remain.
+
+**Mock IAM mode.** With `CYODA_IAM_MODE=mock`, no token is needed. The mock principal opens a stream when `CYODA_IAM_MOCK_KIND` is `service` (the default) and `CYODA_IAM_MOCK_ROLES` holds `ROLE_M2M` (the default does). With `CYODA_IAM_MOCK_KIND=user` or `system` the stream is refused with `PermissionDenied`.
 
 ## 2.3 Dependencies (Java/Kotlin Example)
 
 For JVM-based clients, the recommended dependencies are:
 
-- `io.grpc:grpc-stub`, `io.grpc:grpc-protobuf`, `io.grpc:grpc-netty-shaded` — gRPC runtime
-- `io.cloudevents:cloudevents-protobuf` — CloudEvents SDK Protobuf format support
-- `io.cloudevents:cloudevents-core` — CloudEvents SDK core
-- `com.fasterxml.jackson.core:jackson-databind` — JSON serialization
+- `io.grpc:grpc-stub`, `io.grpc:grpc-protobuf`, `io.grpc:grpc-netty-shaded`: gRPC runtime
+- `io.cloudevents:cloudevents-protobuf`: CloudEvents SDK Protobuf format support
+- `io.cloudevents:cloudevents-core`: CloudEvents SDK core
+- `com.fasterxml.jackson.core:jackson-databind`: JSON serialization
 
 ---
 
 # 3. Connection Setup
 
+The gRPC listener has three properties to plan for:
+
+- **Port.** `CYODA_GRPC_PORT`, default `9090`.
+- **Bind address.** `CYODA_GRPC_BIND_ADDRESS` defaults to loopback (`127.0.0.1`), so only a compute node on the same host can connect. Set it to `0.0.0.0` (or `::`) when compute nodes run on other hosts, or when cyoda runs in a container whose port is mapped.
+- **Plaintext.** The listener has no TLS of its own. In production, TLS is terminated by the ingress, gateway or service mesh in front of it (the Helm chart's `ingress.grpc.tls`), and the compute node connects through it and verifies the server certificate. Plaintext is for localhost or a private Docker network during development.
+
 ## 3.1 Create the gRPC Channel
 
 ```java
+// Production: through the TLS-terminating ingress
 ManagedChannel channel = ManagedChannelBuilder
-    .forAddress("cyoda-host.example.com", 50051)
-    .usePlaintext()           // Use .useTransportSecurity() for TLS in production
+    .forAddress("cyoda-grpc.example.com", 443)
+    .useTransportSecurity()
     .keepAliveTime(30, TimeUnit.SECONDS)
     .keepAliveTimeout(10, TimeUnit.SECONDS)
     .build();
 ```
 
-**Production TLS**: In production, always use TLS. Replace `.usePlaintext()` with:
+For local development against a cyoda process on the same host:
+
 ```java
-    .useTransportSecurity()
-    .sslContext(/* your SSL context */)
+ManagedChannel channel = ManagedChannelBuilder
+    .forAddress("localhost", 9090)
+    .usePlaintext()
+    .build();
 ```
 
-## 3.2 Attach JWT Credentials
+The server accepts transport-level pings from a client as often as every 5 seconds, so a normal `keepAliveTime` is never penalised.
 
-Create a `CallCredentials` implementation that injects the `Authorization` header:
+## 3.2 Attach Credentials
+
+Create a `CallCredentials` implementation that injects the `authorization` metadata:
 
 ```java
 CallCredentials callCredentials = new CallCredentials() {
@@ -131,13 +164,15 @@ CallCredentials callCredentials = new CallCredentials() {
             Metadata headers = new Metadata();
             headers.put(
                 Metadata.Key.of("Authorization", Metadata.ASCII_STRING_MARSHALLER),
-                "Bearer " + jwtTokenSupplier.get()  // Always fetch a fresh token
+                "Bearer " + clientTokenSupplier.get()  // current client_credentials token
             );
             applier.apply(headers);
         });
     }
 };
 ```
+
+`clientTokenSupplier` returns the compute node's cached `client_credentials` token and fetches a new one when it is close to expiry.
 
 ## 3.3 Create the Stub
 
@@ -156,15 +191,15 @@ Every message on the stream is a CloudEvent with a `type` field that determines 
 
 | CloudEvent `type` | Direction | Description |
 |---|---|---|
-| `CalculationMemberJoinEvent` | Client → Server | Register as a calculation member |
-| `CalculationMemberGreetEvent` | Server → Client | Server confirms registration |
-| `CalculationMemberKeepAliveEvent` | Bidirectional | Heartbeat probe and response |
-| `EventAckResponse` | Server → Client | Acknowledgment of keep-alive |
+| `CalculationMemberJoinEvent` | Client → Server | Register as a compute member. Must be the first message. |
+| `CalculationMemberGreetEvent` | Server → Client | Server confirms registration. Always the first event the server sends. |
+| `CalculationMemberKeepAliveEvent` | Server → Client; optionally Client → Server | Liveness probe. Neither side replies to a keep-alive it receives, apart from the client's ack below. |
+| `EventAckResponse` | Client → Server | Acknowledges a server event (a keep-alive probe or the greet) that needs no other answer. |
 | `EntityProcessorCalculationRequest` | Server → Client | Process entity data |
 | `EntityProcessorCalculationResponse` | Client → Server | Return processed entity data |
 | `EntityCriteriaCalculationRequest` | Server → Client | Evaluate a boolean criterion |
 | `EntityCriteriaCalculationResponse` | Client → Server | Return criterion result |
-| `EntityFunctionCalculationRequest` | Server → Client | Compute a typed value (no mutation) |
+| `EntityFunctionCalculationRequest` | Server → Client | Compute a typed value (no side effects) |
 | `EntityFunctionCalculationResponse` | Client → Server | Return the typed result |
 
 ## 4.1 Building a CloudEvent
@@ -175,7 +210,7 @@ To send a CloudEvent on the stream (Java/Kotlin with CloudEvents SDK):
 // 1. Build the CloudEvents SDK event
 io.cloudevents.CloudEvent sdkEvent = CloudEventBuilder.v1()
     .withType("CalculationMemberJoinEvent")   // Must match the type table above
-    .withSource(URI.create("my-calculation-member"))
+    .withSource(URI.create("my-compute-node"))
     .withId(UUID.randomUUID().toString())
     .withData(PojoCloudEventData.wrap(event, e -> objectMapper.writeValueAsBytes(e)))
     .build();
@@ -225,7 +260,7 @@ StreamObserver<CloudEvent> requestObserver = asyncStub.startStreaming(
 
         @Override
         public void onError(Throwable t) {
-            // Connection lost — trigger reconnect (see Section 12)
+            // Stream ended with a gRPC status — act on it per Section 12.1
         }
 
         @Override
@@ -243,86 +278,78 @@ Immediately after opening the stream, send a `CalculationMemberJoinEvent`:
 ```json
 {
   "id": "<uuid>",
-  "tags": ["my-processor-tag", "production"]
+  "tags": ["approval-service", "notification"],
+  "joinedLegalEntityId": "acme"
 }
 ```
 
-**Tags** are critical for routing. The platform routes processing/criteria requests to members whose tags are a **superset** of the tags configured on the workflow processor/criterion. Tags are case-insensitive (lowercased server-side).
+- **`tags`** route callouts to the member. See [tag matching](#521-tag-matching) below.
+- **`joinedLegalEntityId`** is optional and holds your tenant id. The member always joins the tenant of its bearer token. When the field is present and not empty it must equal that tenant exactly, or the stream ends with `PermissionDenied` and nothing is registered. Sending it makes a misconfigured tenant fail at join time instead of leaving the member waiting for callouts that never come.
 
-The server responds with a `CalculationMemberGreetEvent`:
+The server responds with a `CalculationMemberGreetEvent`, always the first event on the stream:
 
 ```json
 {
-  "id": "<uuid>",
-  "success": true,
-  "memberId": "<server-assigned-member-uuid>",
-  "joinedLegalEntityId": "<your-legal-entity-id>"
-}
-```
-
-**Store the `memberId`** — you will need it for keep-alive messages.
-
-If `success` is `false`, inspect the `error` object for the failure reason (e.g., subscription limit exceeded, invalid token).
-
-### 5.3 Keep-Alive
-
-The platform periodically probes your member with `CalculationMemberKeepAliveEvent` messages to verify liveness. You **must** respond to each probe with an `EventAckResponse`.
-
-**Server-initiated keep-alive probe** (Server → Client):
-```json
-{
-  "id": "<probe-uuid>",
-  "memberId": "<your-member-id>"
-}
-```
-
-**Required response** (Client → Server):
-```json
-{
-  "id": "<new-uuid>",
-  "sourceEventId": "<probe-uuid>",
+  "id": "b914c3f1-3cdc-401b-89db-a1262d513465",
+  "memberId": "b914c3f1-3cdc-401b-89db-a1262d513465",
+  "joinedLegalEntityId": "acme",
   "success": true
 }
 ```
 
-You may also send **client-initiated keep-alive** messages to confirm your own
-liveness.
+`memberId` is the server-assigned member id; `joinedLegalEntityId` is the tenant the member joined. A join that fails does not produce a greet: the stream ends with a gRPC status (`InvalidArgument` for a malformed join, `PermissionDenied` for the wrong kind of token or a tenant mismatch). See [Section 14](#14-troubleshooting).
 
-> ⚠️ **The server does not reply to an inbound member keep-alive.** It is
-> liveness-only: it refreshes your member's last-seen timestamp and produces no
-> response event. Each side pings on its own ticker.
->
-> **Do not write a handler that echoes an inbound keep-alive.** Two peers that
-> each echo what they receive form a zero-delay feedback loop, which pins both
-> processes at ~100% CPU with nothing above `Debug` in the logs. If your
-> handler waits for an ack after it sends a keep-alive, remove that wait. No
-> ack arrives.
+### 5.2.1 Tag matching
 
-Anything you send counts as activity: a keep-alive, a processor response, a
-criteria response, or an `EventAckResponse` all refresh liveness. The server
-closes the stream if it sees nothing from you within
-`CYODA_KEEPALIVE_TIMEOUT` seconds (default `30`), and sends its own probes
-every `CYODA_KEEPALIVE_INTERVAL` seconds (default `10`).
+A processor, function criterion or schedule function names the members it may go to in `config.calculationNodesTags`, a comma-separated list. A member matches when it declares **at least one** of those tags: the sets need only overlap. Tags are compared exactly, letter case included; surrounding whitespace in the list is ignored. When `calculationNodesTags` is empty, every member of the tenant matches.
 
-**Timing parameters** (server-side defaults):
+Among the matching members of the tenant, the server picks **round robin**: the member picked longest ago goes next, and a member that has just joined goes first. A member of another tenant is never chosen. To make sure one particular member receives a callout, give it a tag of its own.
+
+### 5.3 Keep-Alive
+
+The server sends each member a `CalculationMemberKeepAliveEvent` every `CYODA_KEEPALIVE_INTERVAL` seconds (default `10`):
+
+```json
+{
+  "id": "b914c3f1-3cdc-401b-89db-a1262d513465",
+  "memberId": "b914c3f1-3cdc-401b-89db-a1262d513465",
+  "success": true
+}
+```
+
+Answer each probe with an `EventAckResponse` whose `sourceEventId` is the probe's `id`:
+
+```json
+{
+  "id": "<new-uuid>",
+  "sourceEventId": "<id of the probe>",
+  "success": true
+}
+```
+
+You may also send keep-alives of your own. The server does not reply to a keep-alive or an ack that a member sends: it records the activity and nothing more. If your handler waits for a reply after it sends a keep-alive, remove that wait.
+
+Anything the member sends counts as activity: an ack, a keep-alive, or a processor, criteria or function response. The server evicts a member, and ends its stream with `DeadlineExceeded`, when either of two things lasts `CYODA_KEEPALIVE_TIMEOUT` seconds (default `30`):
+
+- it has seen nothing from the member;
+- one server-to-client write to the member has stalled. This catches a member that keeps sending keep-alives while its application has stopped reading the stream.
+
+Every callout in flight on an evicted member fails with `COMPUTE_MEMBER_DISCONNECTED`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CYODA_KEEPALIVE_INTERVAL` | `10` s | Interval between server-sent keep-alive probes. |
-| `CYODA_KEEPALIVE_TIMEOUT` | `30` s | Inactivity after which the server **terminates the stream**. |
+| `CYODA_KEEPALIVE_INTERVAL` | `10` s | Interval between server keep-alive probes; also the HTTP/2 transport keepalive idle time. |
+| `CYODA_KEEPALIVE_TIMEOUT` | `30` s | Silence or write stall after which the server **evicts the member and ends the stream**; also the transport keepalive ack timeout. |
 
-> ⚠️ **Going idle costs you the stream, not just routing.** There is no
-> intermediate "marked not alive but still registered" state that a later probe
-> recovers from — exceeding `CYODA_KEEPALIVE_TIMEOUT` closes the stream with
-> `DeadlineExceeded`. Keep your keep-alive handler fast and non-blocking, and
-> implement the reconnection logic in [Section 12.1](#121-reconnection-strategy);
-> it is the only way back.
+<Aside type="caution" title="Going idle costs you the stream">
 
-The server evicts a member for two conditions. The first is inbound silence for
-`CYODA_KEEPALIVE_TIMEOUT`. The second is a **stalled write**: one
-server-to-client write blocked for `CYODA_KEEPALIVE_TIMEOUT`. The second
-condition evicts a node that continues to send keep-alives while its
-application is blocked.
+There is no intermediate "marked not alive but still registered" state that a
+later probe recovers from. Exceeding `CYODA_KEEPALIVE_TIMEOUT` ends the stream.
+Read the stream continuously, keep your keep-alive handling fast and
+non-blocking, and implement the reconnection logic in
+[Section 12.1](#121-reconnection-strategy).
+
+</Aside>
 
 A slow consumer applies back pressure to its own stream only, not to the
 streams of other members.
@@ -331,45 +358,45 @@ streams of other members.
 
 # 6. Handling Processor Requests
 
-When an entity reaches a workflow transition with an externalized processor configured to match your member's tags, the platform sends an `EntityProcessorCalculationRequest`.
+When an entity's workflow reaches a processor whose `calculationNodesTags` match your member's tags, the platform sends an `EntityProcessorCalculationRequest`.
 
 ## 6.1 Request Schema
 
 ```json
 {
-  "id": "<event-uuid>",
-  "requestId": "<correlation-id>",
-  "entityId": "<entity-uuid>",
-  "processorId": "<processor-uuid>",
-  "processorName": "<configured-processor-name>",
-  "transactionId": "<transaction-uuid>",
-  "workflow": {
-    "id": "<workflow-uuid>",
-    "name": "<workflow-name>"
-  },
-  "transition": {
-    "id": "<transition-uuid>",
-    "name": "<transition-name>",
-    "stateFrom": "<source-state>",
-    "stateTo": "<target-state>"
-  },
-  "parameters": { /* arbitrary JSON configured on the processor */ },
+  "id": "f71b5020-e6c0-11f1-a29a-ae468cd3ed16",
+  "requestId": "f71b5020-e6c0-11f1-a29a-ae468cd3ed16",
+  "entityId": "f71b4ba2-e6c0-11f1-a29a-ae468cd3ed16",
+  "processorId": "enrich-invoice",
+  "processorName": "enrich-invoice",
+  "workflow": { "id": "invoice-wf", "name": "invoice-wf" },
+  "transition": { "id": "submit", "name": "submit" },
+  "transactionId": "f71b4b8e-e6c0-11f1-a29a-ae468cd3ed16",
+  "parameters": "{\"key\": \"value\"}",
+  "success": true,
   "payload": {
-    "type": "TREE",
-    "data": { /* entity data as JSON — present only if attachEntity=true */ },
-    "meta": { /* entity metadata */ }
+    "type": "JSON",
+    "data": { "invoiceId": "I-1", "amount": 10 },
+    "meta": {
+      "id": "f71b4ba2-e6c0-11f1-a29a-ae468cd3ed16",
+      "modelKey": { "name": "invoice", "version": 1 },
+      "state": "NEW",
+      "creationDate": "2024-01-03T10:00:51.048963Z",
+      "lastUpdateTime": "2024-01-03T10:00:51.048963Z",
+      "transactionId": "f71b4b8e-e6c0-11f1-a29a-ae468cd3ed16"
+    }
   }
 }
 ```
 
 **Key fields**:
-- `requestId` — You **must** echo this back in the response for correlation.
-- `entityId` — The entity being processed. Echo this back.
-- `processorName` — Use this to dispatch to different business logic handlers.
-- `parameters` — Arbitrary JSON configured on the processor in the workflow definition (the `context` field). Use for passing configuration to your handler.
-- `payload.data` — The entity data. Only present when `attachEntity` is `true` in the workflow configuration.
+- `requestId`: echo it back in the response. Every try of one callout carries the same `requestId`; see [Section 12.4](#124-idempotency).
+- `entityId`: the entity being processed. Echo it back.
+- `processorName`: route to your handler on this.
+- `parameters`: the processor's `config.context` string, forwarded verbatim as a JSON **string**, not parsed. Absent when `context` is empty.
+- `payload`: the entity, present unless the processor sets `attachEntity: false`. `payload.meta.transactionId` is the transaction making this version of the entity.
 
-> 💡 **Auth context**: The CloudEvent envelope for this request also carries auth context extension attributes (`authtype`, `authid`, `authclaims`) identifying the principal whose action triggered the workflow. See [Section 9](#9-auth-context-on-incoming-requests) for details on how to extract them.
+The CloudEvent envelope also carries attributes outside `text_data`: the identity attributes (see [Section 9](#9-auth-context-on-incoming-requests)), the transaction token `cyodatxtoken` (see [Section 10.3.1](#1031-transaction-joined-callbacks)), and the platform time in `time`. A compute node that computes an absolute time reads it from `time`, not from its own clock, so that the result agrees with the platform clock when that clock has been set (see [Controlling time](/build/testing-with-digital-twins/#controlling-time)).
 
 ## 6.2 Response Schema
 
@@ -380,18 +407,23 @@ When an entity reaches a workflow transition with an externalized processor conf
   "entityId": "<echo-entity-id>",
   "success": true,
   "payload": {
-    "type": "TREE",
-    "data": { /* modified entity data to write back */ }
-  }
+    "type": "JSON",
+    "data": { "invoiceId": "I-1", "amount": 10, "riskScore": 3 }
+  },
+  "warnings": []
 }
 ```
 
-**Rules**:
-1. **`requestId`** must exactly match the value from the request.
-2. **`entityId`** must exactly match the value from the request.
-3. If you set `success: true`, the platform applies your `payload.data` to the entity.
-4. If you set `success: false`, the platform treats this as a processing failure. Include an `error` object.
-5. The `payload` field is optional. If omitted (or `payload.data` is null), no data modification occurs.
+**How the server reads an answer.** Answers are decoded strictly and follow these rules:
+
+1. **`id`, `requestId` and `entityId`** identify the answer. `id` is the response event's own new id; `requestId` and `entityId` are copied from the request.
+2. **`success` is optional and defaults to `true`.** An answer that leaves it out has reported success. The smallest successful answer is `{"id": "...", "requestId": "...", "entityId": "..."}`: the processor ran, changed nothing, and the workflow carries on.
+3. **Only `success: false` reports a failure.** An `error` object on its own does not: an answer with an `error` and no `success: false` is a success, and its message reaches nobody. Send `error` only together with `success: false`, and never as `"error": null`.
+4. **An answer the server cannot read fails the callout at once** with `400 WORKFLOW_FAILED`, not retryable, and no other member is tried. Unreadable means: `"success": null`, a member name in the wrong letter case (`"Success"`) or not declared by the schema, a duplicate member, a field of the wrong type, a `payload` that is not an object, or an `error` or `reason` containing the character U+0000. Nothing in such an answer is read, its `warnings` included; the client's error message says what was wrong.
+5. **`payload.data`** replaces the entity's data when it is not null. When `payload` is absent, or `payload.data` is null, the entity is left as it is and the transition continues.
+6. **Returned data is checked like a client write.** It must satisfy the model's schema, and a field the model does not declare is accepted only where the model's `changeLevel` would accept it from a client. Otherwise the transition fails with `WORKFLOW_FAILED` and rolls back.
+
+A processor changes its own entity **only** through the data it returns. It never writes or deletes that entity through the API, with or without the transaction token; see [Section 10.3.1](#1031-transaction-joined-callbacks).
 
 ## 6.3 Error Response
 
@@ -403,81 +435,82 @@ When an entity reaches a workflow transition with an externalized processor conf
   "success": false,
   "error": {
     "code": "BUSINESS_ERROR",
-    "message": "Detailed error description",
+    "message": "credit check failed",
     "retryable": true
   }
 }
 ```
 
-The `error.retryable` flag tells the platform whether it should retry the request on a different member (if a retry policy is configured). Set to `true` for transient failures and `false` for permanent failures.
+A `success: false` answer is the callout's outcome. **No other member is tried**, whatever the processor's `retryPolicy`. The client's operation fails with `400 WORKFLOW_FAILED`; the detail carries your `error.message` (cut to 512 characters), and the response carries `retryable: true` exactly when your `error.retryable` was `true`:
 
-### 6.3.1 Infrastructure failures the platform raises
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "WORKFLOW_FAILED: processor enrich-invoice failed: credit check failed",
+  "instance": "/entity/JSON/invoice/1",
+  "properties": { "errorCode": "WORKFLOW_FAILED", "retryable": true }
+}
+```
 
-Separately from errors *you* return, the platform raises its own codes when a
-callout cannot be delivered at all. These surface uniformly as a **retryable
-`503`** across all three callout kinds — processor, criteria, and function:
+`retryable` tells the *client* that running the whole operation again may succeed. It does not make the server try another member. The exception is an `ASYNC_NEW_TX` processor: its failure is logged, its savepoint is undone, and the operation continues.
 
-| Code | Meaning |
-|---|---|
-| `NO_COMPUTE_MEMBER_FOR_TAG` | No connected member carries the required `calculationNodesTags`. |
-| `COMPUTE_MEMBER_DISCONNECTED` | The selected member dropped mid-dispatch. |
-| `DISPATCH_TIMEOUT` | No response within the configured response timeout. |
-| `DISPATCH_FORWARD_FAILED` | Cross-node forwarding to the member's owner failed. |
+### 6.3.1 Errors the client of the operation sees
 
-Previously some of these — a missing compute member most visibly — fell through
-to a misleading `400 WORKFLOW_FAILED`, which looks like a caller mistake rather
-than a deployment problem. If you have error handling that treats
-`WORKFLOW_FAILED` as non-retryable, re-check it: these now arrive as `503` and
-are worth retrying.
+Separately from errors *you* return, the platform reports failures to deliver or complete a callout. These apply to all three callout kinds:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `NO_COMPUTE_MEMBER_FOR_TAG` | `503`, retryable | No matching member appeared, on any node, within `CYODA_DISPATCH_WAIT_TIMEOUT` (default `5s`). No try was made. |
+| `COMPUTE_MEMBER_DISCONNECTED` | `503`, retryable | The member's stream dropped after it was given the work (single try). |
+| `DISPATCH_TIMEOUT` | `503`, retryable | No answer within `responseTimeoutMs` (single try). |
+| `DISPATCH_FORWARD_FAILED` | `503`, retryable | The answer of the cluster node the callout was handed to was lost (single try). |
+| `CALLOUT_FAILED` | `503`, retryable | More than one try failed; the message lists them. |
+| `WORKFLOW_FAILED` | `400` | The member answered `success: false` (retryable when the member said so), or its answer could not be read (not retryable). |
+| `TRANSACTION_ROLLBACK_ONLY` | `409`, not retryable | A callback's write failed with an error that is not retryable, which made the transaction rollback-only. The message names the code the callback got. |
+| `CONFLICT` | `409`, retryable | A callback's write had already lost a race against another transaction. This takes precedence over the member's answer. |
+
+See [Section 10.5](#105-retry-policies) for when a callout is tried on another member.
 
 ---
 
 # 7. Handling Criteria Requests
 
-When a workflow transition has an externalized criterion configured as a `function`, the platform sends an `EntityCriteriaCalculationRequest`.
+A criterion with a `function` condition is evaluated by a compute node. The platform sends one `EntityCriteriaCalculationRequest` for each function condition that the criterion's evaluation reaches. A function condition inside a group that short-circuits before it, or one whose pre-check did not match, is not called. The grouping rules are in [Workflows and processors](/build/workflows-and-processors/).
 
 ## 7.1 Request Schema
 
 ```json
 {
-  "id": "<event-uuid>",
-  "requestId": "<correlation-id>",
-  "entityId": "<entity-uuid>",
-  "criteriaId": "<criteria-uuid>",
-  "criteriaName": "<configured-function-name>",
+  "id": "3e93c162-e6c1-11f1-8830-ae468cd3ed16",
+  "requestId": "3e93c162-e6c1-11f1-8830-ae468cd3ed16",
+  "entityId": "3e93bef6-e6c1-11f1-8830-ae468cd3ed16",
+  "criteriaId": "is-low-risk",
+  "criteriaName": "is-low-risk",
   "target": "TRANSITION",
-  "transactionId": "<transaction-uuid>",
-  "workflow": {
-    "id": "<workflow-uuid>",
-    "name": "<workflow-name>"
-  },
-  "transition": {
-    "id": "<transition-uuid>",
-    "name": "<transition-name>",
-    "stateFrom": "<source-state>",
-    "stateTo": "<target-state>"
-  },
-  "processor": {
-    "id": "<processor-uuid>",
-    "name": "<processor-name>"
-  },
-  "parameters": { /* arbitrary JSON */ },
+  "workflow": { "id": "claim-wf", "name": "claim-wf" },
+  "transition": { "id": "auto-approve", "name": "auto-approve" },
+  "transactionId": "3e93bed8-e6c1-11f1-8830-ae468cd3ed16",
+  "success": true,
   "payload": {
-    "type": "TREE",
-    "data": { /* entity data */ }
+    "type": "JSON",
+    "data": { "claimId": "C-2" },
+    "meta": { "...": "same shape as a processor request" }
   }
 }
 ```
 
-**The `target` field** indicates what the criterion is attached to:
+**The `target` field** says where the criterion sits:
+
 | Target | Meaning | Available Context |
 |---|---|---|
-| `WORKFLOW` | Workflow-level criterion (selects which workflow applies) | `workflow` |
-| `TRANSITION` | Transition-level criterion (should this transition fire?) | `workflow`, `transition` |
-| `PROCESSOR` | Processor-level criterion (should this processor run?) | `workflow`, `transition`, `processor` |
-| `NA` | Reserved for future use | — |
+| `WORKFLOW` | Workflow-selection criterion (does this workflow apply?) | `workflow` |
+| `TRANSITION` | Transition criterion (should this transition fire?) | `workflow`, `transition` |
 
-> 💡 **Auth context**: Like processor requests, criteria requests also carry auth context extension attributes on the CloudEvent envelope. See [Section 9](#9-auth-context-on-incoming-requests).
+The published schema also lists `PROCESSOR` and `NA`. cyoda-go does not send them.
+
+The envelope carries the same identity, `cyodatxtoken` and `time` attributes as a processor request.
 
 ## 7.2 Response Schema
 
@@ -487,41 +520,41 @@ When a workflow transition has an externalized criterion configured as a `functi
   "requestId": "<echo-request-id>",
   "entityId": "<echo-entity-id>",
   "success": true,
-  "matches": true,
-  "reason": "Entity meets all validation criteria"
+  "matches": false,
+  "reason": "order total 4200 exceeds the 1000 auto-approval limit"
 }
 ```
 
 **Key fields**:
-- `requestId` — Must exactly match the request.
-- `entityId` — Must exactly match the request.
-- `matches` — The boolean result: `true` means the criterion is satisfied (transition fires / processor runs), `false` means it is not.
-- `reason` — Optional explanation for a `false` result; see below.
+- `requestId`, `entityId`: copied from the request, as for a processor.
+- `matches`: **required** on every answer except an explicit `success: false`. `true` means the criterion is satisfied. An answer that omits `matches` is not read as `false`: it is an unreadable answer and fails the operation with `400 WORKFLOW_FAILED`. The `success` default fills in the flag, never the verdict.
+- `reason`: optional explanation for a `false` result; see below.
 
-If `success: false`, the platform treats it as a criteria evaluation failure (the criterion evaluates to `false` by default).
+The answer rules of [Section 6.2](#62-response-schema) apply here as well. A criteria answer with `success: false` does **not** evaluate to `false`: it fails the operation with `400 WORKFLOW_FAILED` (`failed to evaluate transition criterion: <message>`), `retryable` when your error said so.
+
+Criteria must have no side effects, inside cyoda or outside it. The platform treats them as safe to repeat and gives them to another member whenever one does not answer.
 
 ### 7.2.1 Explaining a `false` result
 
 `reason` reaches the caller and the audit trail, so populate it on every
-`false`.
+`false`. It is kept to its first 2048 characters, marked with `…` when cut.
 
 Where it surfaces depends on how the criterion was reached:
 
-- **A manual, explicitly-requested transition** rejected by its criterion
-  appends the reason to the `400 WORKFLOW_FAILED` detail:
+- **A transition the client named**, rejected by its criterion, appends the
+  reason to the `400 WORKFLOW_FAILED` detail:
   `transition "<name>" criterion not matched: <reason>`. This is the
   guaranteed, backend-independent surface.
-- **Automated cascade and workflow-selection paths** additionally record it
-  durably on the state-machine audit trail —
-  `TRANSITION_NOT_MATCH_CRITERION` carries
-  `{workflowName, transition, criterion, reason}` in its `data`, and
-  `WORKFLOW_SKIP` carries `{workflowName, reason}`.
+- **Automated cascade and workflow-selection paths** record it durably on the
+  state-machine audit trail: `TRANSITION_NOT_MATCH_CRITERION` carries it in
+  `data.reason`, and so does `WORKFLOW_SKIP`.
 
-Reasons are capped at **2 KiB**. If you omit one, the *audit trail* falls back
-to `"criterion did not match"` while the `400` detail is left bare — so an
-omitted reason really does leave the caller with nothing. Write the specific
-cause: `"order total 4200 exceeds the 1000 auto-approval limit"` beats
-`"validation failed"`.
+If you omit a reason, the audit trail falls back to `"criterion did not match"`
+and the `400` detail is left bare (`criterion not matched`), so the caller learns
+nothing. Write the specific cause: `"order total 4200 exceeds the 1000
+auto-approval limit"` beats `"validation failed"`. When a function condition
+sits in a group, the reason lists every function condition the evaluation
+reached and what each answered.
 
 ---
 
@@ -533,7 +566,7 @@ allowed to do:
 
 | Callout | Returns | Mutates the entity? |
 |---|---|---|
-| Processor | an updated entity payload | Yes |
+| Processor | an updated entity payload | Yes, through the returned data only |
 | Criteria | a boolean `matches` | No |
 | **Function** | a **declared typed value** | No |
 
@@ -544,7 +577,7 @@ caller can validate what it receives.
 ## 8.1 Request Schema
 
 The request is an `EntityFunctionCalculationRequest`. It mirrors a processor
-request, but the callout target is named by **`functionId` / `functionName`** —
+request, but the callout target is named by **`functionId` / `functionName`**;
 there is no `processorName` on this message, so route on `functionName`.
 
 | Field | Required | Description |
@@ -552,11 +585,11 @@ there is no `processorName` on this message, so route on `functionName`.
 | `requestId` | YES | Echo back unchanged. |
 | `entityId` | YES | Echo back unchanged. |
 | `functionId` | YES | Identifier of the invoked function. |
-| `functionName` | YES | **The routing key** — the registered `schedule.function.name`. Dispatch on this. |
+| `functionName` | YES | **The routing key**: the registered `schedule.function.name`. Dispatch on this. |
 | `workflow` | YES | The workflow this callout belongs to. |
 | `transition` | NO | The transition carrying the schedule. |
 | `transactionId` | NO | The originating transaction. |
-| `payload` | NO | The entity data — present only when `attachEntity` is `true`. |
+| `payload` | NO | The entity data, present unless `attachEntity` is `false`. |
 | `parameters` | NO | The configured `context` string, forwarded verbatim. |
 
 ## 8.2 Response Schema
@@ -572,271 +605,335 @@ there is no `processorName` on this message, so route on `functionName`.
 }
 ```
 
-- `resultKind` — names the shape of `result`. **`"Schedule"` is currently the
+- `resultKind` names the shape of `result`. **`"Schedule"` is currently the
   only defined kind.**
-- `result` — the typed value itself.
-- `success: false`, or an `error`, fails the dispatch exactly as a processor or
-  criteria failure does.
+- `result` is the typed value itself.
+- The answer rules of [Section 6.2](#62-response-schema) apply: `success`
+  defaults to `true`, and only `success: false` reports a failure, which fails
+  the callout as it does for a processor (no other member is tried; the message
+  and `retryable` reach the client).
 
 ## 8.3 The `Schedule` result kind
 
 `Schedule` drives a
-[scheduled transition's](/build/workflows-and-processors/#scheduled-transitions)
+[scheduled transition's](/build/scheduled-transitions/)
 `schedule.function`, computing when a transition should fire for one specific
 entity:
 
-- **Fire time** (required) — exactly one of `fireAt` (absolute epoch-ms) or
+- **Fire time** (required): exactly one of `fireAt` (absolute epoch-ms) or
   `fireAfterMs` (relative to arm time).
-- **Expiry** (optional) — at most one of `expireAt` or `expireAfterMs`, the
+- **Expiry** (optional): at most one of `expireAt` or `expireAfterMs`, the
   latter relative to the *resolved fire time* rather than to arm time.
 
-> ⚠️ **This callout runs inside the caller's write transaction.** It is
-> invoked synchronously while the entity write that arms the timer is still
-> open, and it is re-invoked on *every* re-arm — not once per entity. A slow
-> handler slows every write to that entity; a failing or unreachable handler
-> **fails the write** with a retryable `503`. Keep it fast, side-effect free,
-> and dependent only on data you already have.
->
-> Returning a malformed `result`, or one that does not match the declared
-> `resultKind`, fails the write with `500 SCHEDULE_FUNCTION_INVALID_RESULT`.
+Compute an absolute `fireAt` from the request's CloudEvent `time` attribute,
+the platform clock, not from your own clock.
+
+<Aside type="caution" title="This callout runs inside the caller's write transaction">
+
+It is invoked synchronously while the entity write that arms the timer is
+still open, and it is invoked again on *every* re-arm, not once per entity.
+Like every callout it may also be tried on another member, so the same
+request can run twice. A slow handler slows every write to that entity; a
+failing or unreachable handler **fails the write**. Keep it fast,
+side-effect free, and dependent only on data you already have.
+
+Returning a malformed `result`, or one that does not match the declared
+`resultKind`, fails the write with `500 SCHEDULE_FUNCTION_INVALID_RESULT`.
+
+</Aside>
 
 ---
 
 # 9. Auth Context on Incoming Requests
 
-The platform attaches [CloudEvents Auth Context extension](https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/authcontext.md) attributes to every `EntityProcessorCalculationRequest` and `EntityCriteriaCalculationRequest`. These attributes identify the authenticated principal whose action triggered the workflow execution (e.g., the user who created or updated the entity).
+Every processor, criteria and function request carries identity attributes. They name two principals:
+
+- the **attributed** principal: who the work is *for*;
+- the **executor**: who *does* it.
+
+The two differ whenever one party acts for another. A backend's on-behalf-of request is attributed to the user and executed by the backend's client. A scheduled transition is attributed to whoever armed it and executed by `system`.
 
 ## 9.1 Extension Attributes
 
-The auth context is carried as CloudEvent extension attributes in the Protobuf `attributes` map — **not** inside the JSON `text_data` payload.
+The attributes are entries of the Protobuf CloudEvent's `attributes` map, each holding a string (`ce_string`). They are **not** inside the JSON `text_data` payload. An absent attribute has no entry.
 
-| Attribute | Type | Required | Description |
-|---|---|---|---|
-| `authtype` | String | YES | Principal kind. Exactly one of: `user`, `service`, `system` |
-| `authid` | String | NO | Unique identifier of the principal (UUID). Absent for `system`. |
-| `authclaims` | String | NO | **Comma-separated role names** on cyoda-go (e.g. `ROLE_ADMIN,ROLE_USER`). Absent when the principal has no roles. Never contains credentials. |
+| Attribute | Description |
+|---|---|
+| `authtype` | Kind of the attributed principal: `user`, `service` or `system`. |
+| `authid` | Id of the attributed principal. |
+| `authexectype` | Kind of the executor: `user`, `service` or `system`. |
+| `authexecid` | Id of the executor. |
+| `authclaims` | The **executor's** roles, comma separated. Never the user's: for an on-behalf-of request they are the on-behalf-of client's roles. Absent when the executor has no roles (the `system` executor of a scheduled fire). Never contains credentials. |
+
+`authtype`, `authid` and `authclaims` are attributes of the [CloudEvents Auth Context extension](https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/authcontext.md). `authexectype` and `authexecid` are cyoda's own.
+
+A callout made in mock IAM mode, where the one mock principal is both, carries:
+
+```
+authtype=service      authid=mock-user-001
+authexectype=service  authexecid=mock-user-001
+authclaims=ROLE_ADMIN,ROLE_M2M
+```
 
 ## 9.2 Auth Type Values
 
-| `authtype` Value | Meaning |
+| Value | Meaning |
 |---|---|
-| `user` | A regular authenticated user (JWT-based login) |
-| `service` | A machine-to-machine (M2M) technical account |
-| `system` | An internal platform trigger with no user context |
+| `user` | A person: the user an on-behalf-of token asserts, or the platform operator's `cyoda token`. |
+| `service` | An M2M client acting as itself. |
+| `system` | The platform itself, as the executor of a scheduled fire. |
 
-The value is driven by the principal's **explicit kind**, recorded when the
-principal is established. The platform does not infer it from the roles the
-principal carries.
+The kinds are the principals' explicit kinds, recorded when each principal is established, never inferred from roles. The extension's own list uses `service_account` for a service; cyoda sends `service`.
 
-The attribute is always present and always faithful. If a principal's kind is
-unset or unrecognized, the platform **fails the callout dispatch** rather than
-emitting a normalized placeholder — a bogus `authtype` never reaches your
-compute node.
+If either principal has no id, or a kind that is unset or unrecognized, the platform **fails the callout dispatch** rather than sending a placeholder. A bogus or absent principal never reaches your compute node.
 
-> ⚠️ **The only values are `user`, `service` and `system`.** There is no
-> `service_account`, `unauthenticated` or `unknown`. A handler that switches on
-> one of those strings never matches it. Do not rely on a `default` or `else`
-> branch to catch an unroutable principal either: the platform fails the
-> dispatch rather than sending one.
+<Aside type="caution" title="The only values are user, service and system">
 
-### Attribution vs. execution
+There is no `service_account`, `unauthenticated` or `unknown`. A handler that
+switches on one of those strings never matches it. Do not rely on a `default`
+or `else` branch to catch an unroutable principal either: the platform fails
+the dispatch rather than sending one.
 
-`authtype` and `authid` describe the principal the action is **attributed** to,
-which is not necessarily the identity it **executes** with. When a user's
-action sets off a follow-on — a cascade write from a processor, or a scheduled
-transition firing later — the platform executes it with system or service
-authority, borrowing no user permissions, while still attributing it to the
-principal that caused it. Treat the auth context as provenance for audit and
-business logic, not as proof of the executing identity's privileges.
+</Aside>
+
+### Who is attributed, who executes
+
+| Path | Attributed (`authtype` / `authid`) | Executor (`authexectype` / `authexecid`) |
+|---|---|---|
+| An on-behalf-of request for a user, and every callout of its cascade | the user (`user`) | the on-behalf-of client (`service`) |
+| A client's own request, and its cascade | the client (`service`) | the same client |
+| A compute node's callback that presents the transaction token (a write-back joined to the transaction), and its cascade | the transaction's origin: the user, client or arming principal that began it | the compute node's client (`service`) |
+| A compute node's independent request, without the transaction token (for example the callback of a `COMMIT_BEFORE_DISPATCH` processor with `startNewTxOnDispatch: false`), and its cascade | the compute node's client (`service`) | the same client |
+| A scheduled fire, and every callout of its cascade | the principal that armed the timer | `system` (`system`) |
+| A request with a `cyoda token` (the platform operator's) | the token's user (`user`) | the same (`user`), with the token's roles in `authclaims` |
+| A callout handed over to another cluster node | as computed by the dispatching node | as computed by the dispatching node |
+
+A `COMMIT_BEFORE_DISPATCH` processor with `startNewTxOnDispatch: true` begins its new transaction with the origin of the one it committed, so its callout carries the principals of the request that reached it. Inside a scheduled fire, even a `COMMIT_BEFORE_DISPATCH` processor dispatched outside a transaction carries the arming principal and the `system` executor.
+
+**`authtype == "user"` does not mean "the user acted now".** It is also the value for a compute node's write-back inside that user's transaction, and for a scheduled fire the user armed. A check such as "the submitter may not approve" needs the executor too: require `authtype == "user"`, `authexectype == "service"` and `authexecid` on an allow-list of your backend's on-behalf-of client ids. The full recipe is in [`cyoda help auth integration`](/help/auth/integration/) (*Reading identity in a compute node*).
+
+**There are no user roles in a callout.** cyoda carries none by design: your application decides what a user may do. When a processor needs that, look the user up by `authid` in your own directory, or have the backend record the facts the workflow needs in the entity's data before it calls cyoda.
+
+**Trust the attributes only over TLS.** A compute node relies on them only if it verified the server certificate of the endpoint it connected to (see [Section 3](#3-connection-setup)).
 
 ## 9.3 Extracting Auth Context (Java/Kotlin)
 
-The attributes are available in the Protobuf CloudEvent's `attributes` map. The keys are the attribute names listed above (no prefix):
+The keys in the Protobuf CloudEvent's `attributes` map are the attribute names listed above, with no prefix:
 
 ```java
 // From the gRPC StreamObserver<CloudEvent>.onNext(value):
-String authType = value.getAttributesMap().get("authtype").getCeString();
-String authId = value.getAttributesMap().containsKey("authid")
-    ? value.getAttributesMap().get("authid").getCeString()
-    : null;
-String authClaims = value.getAttributesMap().containsKey("authclaims")
-    ? value.getAttributesMap().get("authclaims").getCeString()
+Map<String, CloudEventAttributeValue> attrs = value.getAttributesMap();
+String attributedType = attrs.get("authtype").getCeString();
+String attributedId   = attrs.get("authid").getCeString();
+String executorType   = attrs.get("authexectype").getCeString();
+String executorId     = attrs.get("authexecid").getCeString();
+String claims = attrs.containsKey("authclaims")
+    ? attrs.get("authclaims").getCeString()
     : null;
 
-// cyoda-go sends roles as a comma-separated string, NOT JSON.
-List<String> roles = (authClaims == null || authClaims.isEmpty())
+// Roles are a comma-separated string, NOT JSON.
+List<String> executorRoles = (claims == null || claims.isEmpty())
     ? List.of()
-    : Arrays.asList(authClaims.split(","));
+    : Arrays.asList(claims.split(","));
 ```
 
-The exact accessor depends on your gRPC tooling — in Go, use the generated message's `GetAttributes()` method; in Python, dict-like indexing on `.attributes`. See your language's generated proto bindings.
+The exact accessor depends on your gRPC tooling. In Python, use dict-like indexing on `.attributes`; in Go, the generated message's `GetAttributes()` method.
 
-**Go clients** can skip the manual extraction. cyoda-go ships an
-`api/grpc/authctx` helper exposing `Type`, `ID` and `Roles` readers plus
-`Require(ce, role)`. `Require` is a **fail-closed** role gate — it returns
-`false` for a nil event, for absent or empty claims, and for
-`authtype == system`. Prefer it over hand-rolled claim parsing, which tends to
-fail *open* on exactly those cases.
+**Go compute nodes** can use the public package
+`github.com/cyoda/cyoda-go/api/grpc/authctx`. Every function takes a
+`*cloudevents.CloudEvent` from `github.com/cyoda/cyoda-go/api/grpc/cloudevents`:
 
-## 9.4 Example Claims JSON
+- `Type(ce)` and `ID(ce)` return the attributed principal;
+- `ExecutorType(ce)` and `ExecutorID(ce)` return the executor (`""` when absent);
+- `Roles(ce)` returns the executor's roles (`nil` when absent);
+- `Require(ce, role)` is a **fail-closed** role gate: it returns `true` only
+  when the executor is a `service` and `role` is in `authclaims`. The
+  attributed principal plays no part in it, so a scheduled fire (executor
+  `system`) never passes.
 
-On cyoda-go, `authclaims` is a flat comma-separated list of role names:
+The package works only on that module's generated CloudEvent type. A compute
+node with its own generated types reads the `attributes` map directly: the
+attribute names and values are the contract, not the package.
 
-```
-ROLE_USER,ROLE_SUPER_USER
-```
+## 9.4 Example Claims
 
-For a `service` (M2M) principal:
+`authclaims` is a flat comma-separated list of the executor's role names. For a
+plain client, or for the on-behalf-of client of a user's request:
 
 ```
 ROLE_M2M
 ```
 
-> ⚠️ **Do not parse this as JSON.** `objectMapper.readValue(authClaims, Map.class)`
-> throws on `ROLE_USER,ROLE_SUPER_USER`. Split on `,`. Go clients should use
-> `authctx.Roles`, which does exactly this.
->
-> Cyoda Cloud has historically sent a richer JSON claims object including
-> `legalEntityId`. If you target both, branch on whether the value starts with
-> `{` rather than assuming either shape.
+For a request made with an operator's `cyoda token` signed with two roles:
+
+```
+ROLE_ADMIN,ROLE_M2M
+```
+
+<Aside type="caution" title="Do not parse authclaims as JSON">
+
+`objectMapper.readValue(authClaims, Map.class)` throws on
+`ROLE_ADMIN,ROLE_M2M`. Split on `,`. Go clients should use `authctx.Roles`,
+which does exactly this.
+
+</Aside>
 
 ## 9.5 Use Cases
 
-- **Audit logging**: Record which user triggered the processing for compliance.
-- **Authorization decisions**: Apply different business logic based on the caller's roles or legal entity.
-- **Multi-tenant isolation**: Verify the triggering principal belongs to the expected tenant.
-- **Debugging**: Trace processing failures back to the originating user action.
+- **Audit logging**: record which user the work was for (`authid`) and which part of the system did it (`authexecid`).
+- **Segregation of duties**: refuse an approval whose attributed user submitted the item, as described above.
+- **Business decisions**: branch on whether the work is a user's request, a client's own work, or a scheduled fire.
+- **Debugging**: trace a processing failure back to the originating request.
 
-> ⚠️ **Note**: The `authclaims` field never contains credentials (passwords, tokens, secrets). It contains only identity and authorization metadata.
+Callouts never cross tenants: a member receives only callouts of the tenant it joined.
 
 ---
 
 # 10. Workflow Configuration
 
-Your calculation member does not exist in isolation — it is invoked by workflow configurations on the platform side. This section describes how workflows reference externalized processors and criteria, so you understand the relationship between your member's tags/handlers and the platform configuration.
+Your compute node does not exist in isolation: workflow configurations on the platform side invoke it. This section describes how workflows reference externalized processors and criteria, so that you understand the relationship between your member's tags and handlers and the platform configuration. The full workflow schema is in [Workflows and processors](/build/workflows-and-processors/).
 
 ## 10.1 Externalized Processor in Workflow JSON
 
 ```json
 {
+  "importMode": "REPLACE",
   "workflows": [{
-    "version": "1",
-    "name": "my-workflow",
-    "initialState": "start",
+    "version": "1.5",
+    "name": "invoice-wf",
+    "initialState": "NEW",
+    "active": true,
     "states": {
-      "start": {
+      "NEW": {
         "transitions": [{
-          "name": "process-data",
-          "next": "processed",
+          "name": "submit",
+          "next": "SUBMITTED",
           "manual": false,
           "processors": [{
-            "name": "my-processor-function",
+            "type": "externalized",
+            "name": "enrich-invoice",
             "executionMode": "SYNC",
             "config": {
               "attachEntity": true,
-              "calculationNodesTags": "my-processor-tag",
-              "responseTimeoutMs": 60000,
+              "calculationNodesTags": "invoice-service",
+              "responseTimeoutMs": 5000,
               "retryPolicy": "FIXED",
+              "idempotent": true,
               "context": "{\"key\": \"value\"}"
             }
           }]
         }]
       },
-      "processed": {}
+      "SUBMITTED": {}
     }
   }]
 }
 ```
+
+Import it with `POST /api/model/{entityName}/{modelVersion}/workflow/import`.
 
 ## 10.2 Processor Configuration Fields
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | — | **Required.** The processor name. Sent as `processorName` in the request. |
-| `executionMode` | string | — | **Required.** One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`, `COMMIT_BEFORE_DISPATCH`. |
-| `config.attachEntity` | boolean | `true` | Whether to send entity data in the request payload. A processor that omits this field is imported with `attachEntity: true`. Set it to `false` explicitly to opt out. |
-| `config.calculationNodesTags` | string | `""` | Comma/semicolon-separated tags. Only members whose tags are a superset are eligible. |
-| `config.responseTimeoutMs` | long | `30000` | How long the platform waits for your response before timing out. |
-| `config.retryPolicy` | string | `FIXED` | `NONE` — no retry. `FIXED` — retry with fixed delay (default: 3 retries, 500ms delay). |
-| `config.context` | string | `null` | Arbitrary string passed as `parameters` in the request. Use for handler-specific configuration. |
-| `config.asyncResult` | boolean | `false` | Enable async response processing (advanced). |
-| `config.crossoverToAsyncMs` | long | `5000` | Time before switching from sync to async response handling (advanced). |
-| `startNewTxOnDispatch` | boolean | `false` | Whether a fresh transaction is started when this processor is dispatched. Valid only when `executionMode` is `COMMIT_BEFORE_DISPATCH`; the validator rejects `true` for any other mode. With `COMMIT_BEFORE_DISPATCH` and `startNewTxOnDispatch=false` (the default), callbacks run standalone instead of joining the originating transaction (see §10.3.1). |
+| `type` | string | `externalized` | The only value accepted. Any other value is refused at import with `400 VALIDATION_FAILED`. |
+| `name` | string | (required) | The processor name. Sent as `processorName` in the request. |
+| `executionMode` | string | `SYNC` | One of `SYNC`, `ASYNC_SAME_TX`, `ASYNC_NEW_TX`, `COMMIT_BEFORE_DISPATCH`. Empty means `SYNC`. See [Section 10.3](#103-execution-modes). |
+| `config.attachEntity` | boolean | `true` | Whether to send the entity in the request payload. Set it to `false` explicitly to opt out. |
+| `config.calculationNodesTags` | string | `""` | Comma-separated tags. A member matches when it declares at least one of them; empty matches every member of the tenant. See [Section 5.2.1](#521-tag-matching). |
+| `config.responseTimeoutMs` | integer | `CYODA_CALLOUT_RESPONSE_TIMEOUT_MS` (`30000`) | How long one try waits for a member's answer. `0` or absent means the server default. A value above `CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS` (default `60000`) is refused at import. |
+| `config.retryPolicy` | string | `FIXED` | `NONE`: one try. `FIXED` or absent: one try plus `CYODA_RETRY_FIXED_NUM_RETRIES` (default `3`), so four tries. There is no delay between tries. See [Section 10.5](#105-retry-policies). |
+| `config.idempotent` | boolean | `false` | Your declaration that the processor may run more than once for one callout, partly or at the same time on two members, with the same outcome as running it once, in cyoda and in every system it touches. Lets the platform give the work to another member after one went quiet. |
+| `config.context` | string | (none) | Forwarded verbatim as the `parameters` string of the request. Use it to serve several workflow roles from one handler. |
+| `startNewTxOnDispatch` | boolean | `false` | Sibling of `config`, not inside it. Valid only with `COMMIT_BEFORE_DISPATCH`; refused with any other mode. With `true`, a new transaction is opened before dispatch and the processor's callbacks join it. |
+
+`config.asyncResult: true` and any `config.crossoverToAsyncMs` are refused at import with `400 VALIDATION_FAILED`: cyoda-go does not implement them.
 
 ## 10.3 Execution Modes
 
 | Mode | Behavior |
 |---|---|
-| `SYNC` | The workflow engine waits for your response within the same transaction. The transition completes only after your response is applied. |
-| `ASYNC_SAME_TX` | The engine sends the request and can process other work. Your response is applied within the same entity transaction. |
-| `ASYNC_NEW_TX` | Like `ASYNC_SAME_TX`, but your response is applied in a new transaction. Useful for long-running computations. |
-| `COMMIT_BEFORE_DISPATCH` | Commits the originating transaction before dispatching the request, releasing the storage connection for the duration of the external compute; the processor runs outside any transaction unless `startNewTxOnDispatch=true` opens one for it (see §10.3.1). On return, the result is reapplied via CompareAndSave in a new transaction. Relieves connection-pool pressure for slow processors; supersedes `ASYNC_NEW_TX` as the recommended mode for slow external work. |
+| `SYNC` | The engine dispatches and blocks until the answer arrives; the entity's transaction stays open during the wait. A failed callout fails the operation and the entity stays in its source state. |
+| `ASYNC_SAME_TX` | Same dispatch and failure behaviour as `SYNC`: it blocks inline, in the same transaction. |
+| `ASYNC_NEW_TX` | Dispatched inside a **savepoint** of the same transaction. On a processor failure the savepoint is undone, a warning is logged, its returned data is discarded, and the operation continues to the next processor. |
+| `COMMIT_BEFORE_DISPATCH` | Commits the work so far before dispatching, releasing the storage connection during the external compute. The entity is then durable in its pre-callout state. The result is applied in a new transaction by compare-and-save; if another transaction changed the entity meanwhile, the operation fails with `412 ENTITY_MODIFIED`. The recommended mode for slow external work. |
 
-> For most use cases, **`SYNC`** is the simplest and recommended starting point.
+`SYNC` is the simplest starting point. A `COMMIT_BEFORE_DISPATCH` processor must be idempotent, or detect prior completion with a key of its own, because a client that repeats the operation dispatches it again with a new `requestId`. What each mode leaves behind on failure is set out in [Workflows and processors](/build/workflows-and-processors/#processors).
 
 ### 10.3.1 Transaction-joined callbacks
 
-Processor and criteria-evaluation callbacks from a compute node **join the originating workflow transaction** `T` rather than running standalone. Before each dispatch the engine mints a signed HMAC transaction token and attaches it to the outbound CloudEvent as the `cyodatxtoken` extension attribute. Your compute node echoes it back on callbacks — as the `X-Tx-Token` HTTP header or the `tx-token` gRPC metadata — and the receiving node verifies the HMAC and routes the callback to the transaction owner (a local join when the owner is this node, or an HTTP reverse-proxy / gRPC forward otherwise).
+A processor, a function criterion or a schedule function may call back into the platform while it handles a callout: read entities, search, write other entities. Such a request is a **callback**.
 
-The practical consequences:
+Before each try of a callout, the engine mints a signed transaction token and attaches it to the request as the `cyodatxtoken` CloudEvent attribute. A callback that echoes it, as the `X-Tx-Token` HTTP header or the `tx-token` gRPC metadata, **joins the callout's transaction**. Every callback also carries the compute node's own current `client_credentials` token as its bearer. A callback without the transaction token is an independent request in a transaction of its own: the normal case for a `COMMIT_BEFORE_DISPATCH` processor with `startNewTxOnDispatch: false`, whose callout carries no token.
 
-- Callbacks see the cascade's **uncommitted** writes, and their acks stay provisional until `T` commits.
-- `ASYNC_NEW_TX` callbacks join `T` via a savepoint, so a processor failure discards its own writes without aborting the whole cascade.
-- If no token is present the callback falls back to standalone execution — the normal behaviour for `COMMIT_BEFORE_DISPATCH` with `startNewTxOnDispatch=false`.
-- **The token covers the search RPCs as well as the write RPCs.** A callback that presents a valid `tx-token` on `EntitySearch` or `EntitySearchCollection` joins `T`, so a processor's searches see the writes the same processor has already made in that transaction.
-- **`pointInTime` selects committed state, even inside a joined transaction.**
-  A point-in-time read is committed-only on every backend, so it does not see
-  the writes `T` has not yet committed. Pass it when you want the committed
-  state as at an instant, which is the usual reason to read history from a
-  processor. Omit it when you want to read back what this transaction has
-  written: a current-state read inside `T` is read-your-own-writes correct. An
-  entity that this transaction created, read back with `pointInTime`, answers
-  `404 ENTITY_NOT_FOUND`.
-- **A request that joins an open transaction cannot carry its own deadline.**
-  The server rejects `transactionTimeoutMillis`, `transactionSize` and search's
-  `timeoutMillis` with `400` on a joined callback. The callback does not own
-  the transaction.
-- **The model governs the data you return.** See
-  [the model governs the data a processor returns](/build/workflows-and-processors/#processors).
+**What a joined callback sees.** A read, search, count or page under the token sees the entity the callout runs for as the workflow has it at the moment of the callout, and sees what earlier callbacks of the same transaction wrote. These writes are uncommitted and provisional until the operation that owns the transaction commits. A read with `pointInTime` selects committed state, even inside a joined transaction; omit it to read what this transaction has written. An entity this transaction created, read with `pointInTime`, answers `404 ENTITY_NOT_FOUND`.
 
-Three environment variables tune this (full list in the [configuration reference](/reference/configuration/#all-variables)):
+**The rules a compute node must follow:**
 
-- `CYODA_TX_TOKEN_TTL` — validity of the signed token (default `1m30s`).
-- `CYODA_GRPC_NODE_ADDR` — this node's gRPC endpoint advertised to peers (`host:port`, no scheme), used for B→A forwarding.
-- `CYODA_COMPUTE_HTTP_BASE` — base URL of the cyoda instance a compute node calls back into (compute-client side).
+- **Never write the entity the callout runs for.** A processor changes its entity only through the data it returns. No callback writes or deletes that entity, with or without the token, and no callback writes any entity whose cascade is running in the same transaction. Such a write starts the entity's workflow again inside its own cascade, which can loop without end. Read the entity under the token, or from the request's payload.
+- **Send the callbacks of one transaction in series.** On the in-tree backends (memory, SQLite, PostgreSQL) each callback holds the transaction while the server works on it, so callbacks sent in parallel are served one at a time. When a callback's write runs a workflow with a callout of its own, other callbacks of the transaction are refused with `503 TRANSACTION_BUSY` (retryable) until that inner callout is answered. At most `CYODA_CALLOUT_JOINED_MAX_WAITERS` (default `128`) callbacks may wait; past that, `503 TOO_MANY_JOINED_REQUESTS` (retryable, after a short back-off).
+- **Each callback is all-or-nothing.** A `2xx` answer means all its writes were kept in the transaction; any error means none were. A schema extension a write made stays either way. After a retryable error, send the callback again under the same token. A **write** that fails with an error that is not retryable makes the transaction rollback-only: the callout is stopped, and the operation fails with `409 TRANSACTION_ROLLBACK_ONLY` (under an `ASYNC_NEW_TX` processor, that processor fails instead and the operation continues). A failed read marks nothing.
+- **A token belongs to one try of one callout.** Once the server has given the callout to another member, or the callout has ended, a callback bearing the token is refused with `410 CALLOUT_SUPERSEDED` while the transaction is open, and `404 TRANSACTION_NOT_FOUND` once it has closed. A callback still running at that moment completes, is discarded, and is answered `410 CALLOUT_SUPERSEDED`. A token past its expiry is refused with `410 TRANSACTION_EXPIRED`; a malformed token with `401 UNAUTHORIZED`. None of these is retryable: stop working on that request.
+- **A callback never commits the transaction it joined.** A callback write that reaches a `COMMIT_BEFORE_DISPATCH` processor is refused with `409 COMMIT_IN_JOINED_TRANSACTION`, and makes the transaction rollback-only. Make such a write as an independent request, without the token.
+- **A callback never administers a model or a workflow.** A request under the token that would import, delete, lock, unlock, change the level of, or set the unique keys of a model, or import a workflow, is refused with `400 MODEL_ADMIN_IN_JOINED_TRANSACTION` before anything is read or written.
+- **A joined callback cannot carry its own deadline or batching.** `transactionTimeoutMillis`, `transactionSize`, `transactionWindow` and search's `timeoutMillis` are refused with `400` on a callback that joins a transaction. A collection write runs as one unit.
+- **Keep answers small.** A callback's request body is limited to 10 MiB, and its answer to `CYODA_CALLOUT_JOINED_RESPONSE_MAX_BYTES` (default 10 MiB): a larger answer fails with `413 JOINED_RESPONSE_TOO_LARGE`. Page large reads with `pageSize` and `pageNumber`.
+- **An edge message is not part of the transaction.** A message a processor saves stays even when the transaction rolls back, and is saved again if the processor is repeated. Make the save idempotent and attach the message id to the entity that owns it.
+
+Over gRPC, these errors arrive in the RPC's error envelope (`success: false`, `error.code` `CLIENT_ERROR`, `error.message` starting with the code), not as a gRPC status. A failing bearer token is the gRPC status `Unauthenticated`.
+
+A callback is not abandoned when the member's connection drops, or when a deadline the member sets on its own call passes: once it has its turn on the transaction it runs to completion. If the connection drops, the outcome of a write is unknown; do not assume it failed.
+
+**Server settings** (see the [configuration reference](/reference/configuration/#all-variables)):
+
+- `CYODA_CALLOUT_PASS_ALLOWANCE` (default `30s`): how long the transaction token outlives its try's answer limit.
+- `CYODA_CALLOUT_JOINED_MAX_WAITERS` (default `128`) and `CYODA_CALLOUT_JOINED_RESPONSE_MAX_BYTES` (default 10 MiB): the limits above.
+- `CYODA_GRPC_NODE_ADDR`: in a cluster, this node's gRPC endpoint advertised to peers, which forward callbacks to the node that holds the transaction.
+
+The `CYODA_COMPUTE_*` variables in `cyoda help config grpc` are a convention of cyoda's own test compute node. The server does not read them, and your compute node may take its endpoint and credentials from any configuration.
 
 ## 10.4 Externalized Criteria (`type: function`) in Workflow JSON
 
 ```json
 {
-  "transitions": [{
-    "name": "conditional-transition",
-    "next": "target-state",
-    "manual": false,
-    "criterion": {
-      "type": "function",
-      "function": {
-        "name": "my-criteria-function",
-        "config": {
-          "attachEntity": true,
-          "calculationNodesTags": "my-processor-tag",
-          "responseTimeoutMs": 5000,
-          "retryPolicy": "NONE"
-        }
+  "name": "auto-approve",
+  "next": "APPROVED",
+  "manual": false,
+  "criterion": {
+    "type": "function",
+    "function": {
+      "name": "is-low-risk",
+      "config": {
+        "attachEntity": true,
+        "calculationNodesTags": "invoice-service",
+        "responseTimeoutMs": 5000,
+        "retryPolicy": "NONE"
       }
     }
-  }]
+  }
 }
 ```
 
-Criteria functions use the same `config` fields as processors (except `asyncResult` and `crossoverToAsyncMs`, which are not applicable to criteria).
+Function criteria use the same `config` fields as processors, apart from `idempotent`, which a criterion's `config` refuses with `400 VALIDATION_FAILED`: a criterion is treated as repeat-safe by rule.
 
 ## 10.5 Retry Policies
 
-| Policy | Behavior |
+A **try** is one attempt to hand a callout to one compute member. Every try of one callout carries the same `requestId`, the same `id` and the same `transactionId`. Tries follow one after another with no delay.
+
+| Policy | Tries |
 |---|---|
-| `NONE` | No retry. If the member fails or times out, the processing fails. |
-| `FIXED` | Retries up to N times (default: 3) with a fixed delay (default: 500ms) between retries. Each retry attempts a **different** member if available (the failed member is excluded from selection). |
+| `NONE` | One try. |
+| `FIXED` (or absent) | One try plus `CYODA_RETRY_FIXED_NUM_RETRIES` (default `3`), so four tries. The number is set on the server, not in the workflow. |
+
+Whether another member is tried depends on how far the work got:
+
+- **The work never reached a member** (it had gone, or was not taking data): another member is tried, for every callout kind.
+- **The work reached the member, then no answer within `responseTimeoutMs`, or its connection dropped**: another member is tried for a criterion, a function, or a processor with `idempotent: true`. For any other processor **nothing else is tried**, and the callout fails. This is the repeat rule: a member that went quiet may still have done the work, inside cyoda or outside it.
+- **The member answered `success: false`, or its answer could not be read**: nothing else is tried, whatever `idempotent` says.
+
+**Waiting for a member is not a try.** When no matching member is attached anywhere, the callout waits up to `CYODA_DISPATCH_WAIT_TIMEOUT` (default `5s`, once per callout) and continues the moment one attaches, then fails with `503 NO_COMPUTE_MEMBER_FOR_TAG`. This applies with `retryPolicy: NONE` too.
+
+**Time is the hard limit.** In a cluster a callout can be handed to peer nodes with the tries that are left, so the number of tries is the normal number rather than a hard limit. A callout never runs longer than `tries × answer limit + CYODA_DISPATCH_WAIT_TIMEOUT + CYODA_CALLOUT_HANDOVER_ALLOWANCE`, which is 155 s at the defaults.
 
 ---
 
@@ -857,10 +954,10 @@ All events on the stream extend the `BaseEvent` schema:
 }
 ```
 
-- `id` — Every event must have a unique ID (UUID recommended).
-- `success` — Defaults to `true`. Set to `false` to indicate an error.
-- `error` — Only relevant when `success` is `false`. The `code` and `message` fields are required within the error object.
-- `warnings` — Optional array of warning strings.
+- `id`: every event must have a unique ID (UUID recommended).
+- `success`: optional; defaults to `true`. Send `false` explicitly to report a failure. `null` is not a valid value.
+- `error`: send it only with `success: false`; never send `"error": null`. `code` and `message` are required within it.
+- `warnings`: optional array of warning strings. The warnings of an answer that was read reach the client.
 
 ---
 
@@ -868,29 +965,39 @@ All events on the stream extend the `BaseEvent` schema:
 
 ## 12.1 Reconnection Strategy
 
-gRPC streams can be terminated by network issues, server restarts, or load balancer timeouts. Implement automatic reconnection:
+gRPC streams end for network problems, server restarts and rolling upgrades, client changes, and evictions. Act on the status the stream ended with:
 
-1. **Detect disconnection** via `onError` or `onCompleted` on the response observer.
-2. **Back off exponentially** — start at 1 second, cap at 60 seconds.
-3. **Re-join after reconnect** — every new stream requires a fresh `CalculationMemberJoinEvent`.
-4. **Refresh the JWT token** before reconnecting if it is near expiry.
+| Status | Cause | What to do |
+|---|---|---|
+| `Unauthenticated` | Missing or invalid token; or the client was deleted, or its secret reset, since the token was issued | Read the current credentials, fetch a new token, reconnect. If a freshly fetched token is refused again, the client is gone: stop and alert, do not loop. |
+| `Unavailable` | The node is shutting down (it closes open streams within 10 seconds of `SIGTERM`), a send failed, or the client store could not be read | Reconnect with backoff, through the load balancer, to any node. |
+| `Internal` | The server failed to build a message | Reconnect with backoff; report it if it repeats. |
+| `DeadlineExceeded` | Evicted for silence or a stalled write | Reconnect at once, and fix the cause: read the stream continuously and answer keep-alives. |
+| `PermissionDenied` | Wrong kind of token, or `joinedLegalEntityId` names another tenant | Fix the configuration. Do not reconnect in a loop. |
+| `InvalidArgument` | The first message was not a valid join, or a CloudEvent was malformed | Fix the client. Do not reconnect in a loop. |
+
+For the statuses you reconnect on:
+
+1. **Back off exponentially**: start at 1 second, cap at 60 seconds.
+2. **Re-join after reconnect**: every new stream requires a fresh `CalculationMemberJoinEvent`.
+3. **Use a current token**: fetch a new one before reconnecting if the cached one is near expiry.
 
 ```
-┌─────────┐    onError/onCompleted    ┌──────────┐    delay    ┌──────────────┐    success    ┌──────┐
-│ Connected│ ──────────────────────► │ Backoff  │ ────────► │ Reconnecting │ ────────────► │ Join │
-└─────────┘                          └──────────┘           └──────────────┘              └──────┘
-     ▲                                                            │ failure                   │
-     │                                                            ▼                           │
-     │                                                      ┌──────────┐                      │
-     │                                                      │ Backoff  │ (increase delay)      │
-     │                                                      └──────────┘                      │
-     └────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────┐    onError/onCompleted    ┌──────────┐    delay    ┌──────────────┐    success    ┌──────┐
+│ Connected│ ────────────────────────► │ Backoff  │ ────────► │ Reconnecting │ ────────────► │ Join │
+└──────────┘                           └──────────┘           └──────────────┘              └──────┘
+     ▲                                                              │ failure                   │
+     │                                                              ▼                           │
+     │                                                        ┌──────────┐                      │
+     │                                                        │ Backoff  │ (increase delay)      │
+     │                                                        └──────────┘                      │
+     └──────────────────────────────────────────────────────────────────────────────────────────┘
                                               Greet received
 ```
 
 ## 12.2 Thread Safety
 
-The gRPC `StreamObserver` is **not thread-safe**. If your business logic runs on multiple threads, synchronize all calls to `observer.onNext()`:
+The gRPC `StreamObserver` is **not thread-safe**, and gRPC forbids concurrent sends on one stream. If your business logic runs on multiple threads, synchronize all calls to `observer.onNext()`:
 
 ```java
 synchronized (requestObserver) {
@@ -900,16 +1007,26 @@ synchronized (requestObserver) {
 
 ## 12.3 Response Timeouts
 
-Your client must respond within the configured `responseTimeoutMs` (default **30 seconds** — `defaultResponseTimeoutMs` in the engine). If you exceed this:
-- The platform considers the request failed.
-- If retry policy is `FIXED`, the platform retries with a different member.
-- Late responses are silently discarded.
+Each try waits for your answer for the callout's `responseTimeoutMs`, or the server's `CYODA_CALLOUT_RESPONSE_TIMEOUT_MS` (default **30 seconds**) when the callout sets none. When a try times out:
+
+- the try has failed;
+- another member is tried only under the rules of [Section 10.5](#105-retry-policies): for a processor, only if it is `idempotent`;
+- an answer that arrives late is discarded, and callbacks under that try's transaction token are refused with `410 CALLOUT_SUPERSEDED`.
 
 Design your business logic to complete well within the timeout, accounting for network latency.
 
 ## 12.4 Idempotency
 
-In edge cases (e.g., network partitions, retries), you may receive the same request more than once. Use the `requestId` as an idempotency key to avoid processing the same request twice.
+The same callout can reach your compute node more than once: on another member after a timeout or a dropped connection, or on the same member after it reconnects. Every try of one callout carries the same `requestId`, so a member, or a de-duplication store shared by several members, can recognise a repeat by it.
+
+`requestId` does **not** cover a new callout that does the same work: the client repeating the operation, the scheduler retrying a scheduled run, or a `COMMIT_BEFORE_DISPATCH` processor dispatched again. Each is a new callout with a new `requestId`. Recognise those by a key of your own.
+
+What is safe to repeat:
+
+- **Inside cyoda.** A member that has been replaced is shut out: its callbacks are refused with `CALLOUT_SUPERSEDED`. "Set this field to X" is safe to repeat; "add 10 to the balance" is not. "Create an entity" is never safe to repeat as it stands: check first whether the entity already exists.
+- **Outside cyoda.** Charging a card, sending a message or calling another service is not part of a cyoda transaction. A rollback does not undo it, and a repeat does it again. Use `requestId` as the idempotency key the other system sees, or compensate.
+- **Criteria and functions** must have no side effects at all. The platform repeats them freely.
+- **A processor that only returns changed data**, with no callbacks and no outside effects, is trivially safe: mark it `idempotent: true`.
 
 ## 12.5 Graceful Shutdown
 
@@ -923,20 +1040,20 @@ When shutting down your client:
    channel.shutdown().awaitTermination(10, TimeUnit.SECONDS);
    ```
 
-The platform will detect the stream closure and broadcast a member-offline event to the cluster. Pending requests that were in-flight will time out and may be retried on other members.
+The platform sees the stream close. Callouts in flight on the member fail with `COMPUTE_MEMBER_DISCONNECTED` and are tried on another member where [Section 10.5](#105-retry-policies) allows.
 
 ## 12.6 Multiple Members
 
-You can run **multiple calculation member instances** (same or different processes) with the same tags for horizontal scaling and high availability. The platform selects one eligible member per request, preferring members connected to the local cluster node. Running at least two members ensures continued processing if one goes down.
+Run **several members** with the same tags, in one process or several, for horizontal scaling and high availability. The platform spreads callouts over the matching members of the tenant round robin, and in a cluster a node tries its own members before handing a callout to a peer. Running at least two members keeps processing going while one is down. All replicas of one compute-node service share its client.
 
 ## 12.7 Monitoring
 
 Track these metrics in your client:
-- **Request count** by type (processor vs. criteria) and result (success vs. failure)
-- **Response latency** (time from receiving request to sending response)
-- **Keep-alive response time**
-- **Reconnection count and frequency**
-- **Stream errors** (by gRPC status code)
+- **Request count** by type (processor, criteria, function) and result (success, failure)
+- **Response latency** (time from receiving a request to sending its answer)
+- **Repeated `requestId`s** (callouts that reached you more than once)
+- **Reconnection count and frequency**, by gRPC status
+- **Callback errors** by code (`CALLOUT_SUPERSEDED`, `TRANSACTION_BUSY`, `TOO_MANY_JOINED_REQUESTS`)
 
 ---
 
@@ -945,22 +1062,23 @@ Track these metrics in your client:
 ```
 Client                                          Server
   │                                                │
-  │──── startStreaming() ─────────────────────────►│   (open bidirectional stream)
+  │──── startStreaming() ─────────────────────────►│   (open stream with the client's own token)
   │                                                │
   │──── CalculationMemberJoinEvent ───────────────►│   (register with tags)
   │◄─── CalculationMemberGreetEvent ───────────────│   (server confirms, assigns memberId)
   │                                                │
-  │◄─── CalculationMemberKeepAliveEvent ───────────│   (periodic heartbeat probe)
+  │◄─── CalculationMemberKeepAliveEvent ───────────│   (periodic liveness probe)
   │──── EventAckResponse ─────────────────────────►│   (ack the probe)
   │                                                │
   │◄─── EntityProcessorCalculationRequest ─────────│   (process this entity)
+  │       ┄┄ callbacks over HTTP/gRPC, in series,  │
+  │          with tx-token + client token ┄┄       │
   │──── EntityProcessorCalculationResponse ───────►│   (here's the result)
   │                                                │
   │◄─── EntityCriteriaCalculationRequest ──────────│   (evaluate this criterion)
   │──── EntityCriteriaCalculationResponse ────────►│   (matches: true/false)
   │                                                │
-  │──── CalculationMemberKeepAliveEvent ──────────►│   (client-initiated heartbeat)
-  │◄─── EventAckResponse ─────────────────────────│   (server acks)
+  │──── CalculationMemberKeepAliveEvent ──────────►│   (optional; the server does not reply)
   │                                                │
 ```
 
@@ -970,17 +1088,22 @@ Client                                          Server
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `UNAUTHENTICATED` on stream open | Missing/invalid/expired JWT token | Refresh JWT before connecting. Ensure `Authorization: Bearer <token>` header. |
-| `NOT_FOUND` after JWT validation | User not found in Cyoda for the given JWT | Verify user enrollment and legal entity configuration. |
-| Greet event has `success: false` | Subscription limit exceeded (max client nodes) | Check your subscription plan limits. |
-| Stream closed with `DeadlineExceeded` | Nothing sent within `CYODA_KEEPALIVE_TIMEOUT` (default 30 s) | Ensure a non-blocking, fast keep-alive handler; check network latency. Reconnect per [Section 12.1](#121-reconnection-strategy). |
-| Requests not arriving | Tags mismatch | Verify your member's tags are a superset of the workflow processor's `calculationNodesTags`. Tags are case-insensitive. |
-| Requests not arriving | Member on wrong legal entity | Requests only route to members in the same legal entity as the entity owner. |
-| Request timeout | Business logic too slow | Optimize processing time or increase `responseTimeoutMs` in workflow config. |
-| Duplicate requests | Retry policy triggered | Implement idempotency using `requestId`. |
-| Stream drops unexpectedly | Server restart, network issue, idle timeout | Implement reconnection with exponential backoff (Section 12.1). |
-| `authtype` is `system` unexpectedly | Workflow triggered by an internal platform action (e.g., scheduled transition) or no user context was available | This is expected for system-initiated workflows. If you expect a user context, verify the originating API call is authenticated. |
-| `authclaims` is missing | The triggering principal is a plain `IUser` without extended claims, or the auth type is `system` | Only `user` and `service` auth types include claims. Check `authtype` before parsing claims. |
-| `authtype` is `service`, not `service_account` | `service_account` is not a value the platform emits | Switch on `service` instead. See [Section 9.2](#92-auth-type-values). |
-| Callout never arrives; dispatch fails | The originating principal's kind is unset or unrecognized | Dispatch fails closed rather than sending a bogus `authtype`. Check the principal's kind on the platform side. |
-
+| `Unauthenticated` on stream open | Missing or invalid token | Send the client's current `client_credentials` token as `authorization: Bearer <token>`. |
+| `Unauthenticated` on an open stream, or on reconnect with the old token | The client was deleted, or its secret was reset | Read the new secret from your secret store, fetch a new token, reconnect. If a fresh token is refused, stop and alert. |
+| `PermissionDenied` on stream open | An on-behalf-of token, a `cyoda token`, or a token without `ROLE_M2M`; in mock mode, `CYODA_IAM_MOCK_KIND` is `user` or `system` | Use the compute node's own `client_credentials` token; in mock mode use the default `service` kind. |
+| `PermissionDenied` after the join | `joinedLegalEntityId` is not the token's tenant | Set it to your tenant id, or leave it out. |
+| Connection refused from another host or a container | The gRPC listener binds loopback by default | Set `CYODA_GRPC_BIND_ADDRESS=0.0.0.0` on the server. |
+| Stream closed with `DeadlineExceeded` | Nothing received within `CYODA_KEEPALIVE_TIMEOUT` (default 30 s), or a write to the member stalled | Read the stream continuously; keep the keep-alive handler fast and non-blocking. Reconnect per [Section 12.1](#121-reconnection-strategy). |
+| Requests not arriving; client sees `503 NO_COMPUTE_MEMBER_FOR_TAG` | No tag in common with the callout's `calculationNodesTags`, or a letter-case difference, or the member joined another tenant | Declare at least one of the callout's tags, spelled exactly. Check the tenant in the greet. |
+| Client sees `503 DISPATCH_TIMEOUT` or `CALLOUT_FAILED` | Business logic too slow | Make the handler faster, or raise `responseTimeoutMs` (up to `CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS`). |
+| Client sees `400 WORKFLOW_FAILED` "could not be read" | The answer broke a rule of [Section 6.2](#62-response-schema): `"success": null`, a wrong-case or undeclared member, a missing `matches` | Send the members the schema declares, spelled exactly. |
+| A failure is reported as a success | The answer carries `error` but not `success: false` | Send `success: false` with the `error`. |
+| Same `requestId` received twice | The callout was given to this member again after a timeout or reconnect | Expected. De-duplicate on `requestId`. |
+| Callback answered `410 CALLOUT_SUPERSEDED` | The try timed out and the callout moved on, or the callout ended | Stop working on that request; its writes are discarded. |
+| Callback answered `503 TRANSACTION_BUSY` | Another callback of the transaction is paused in a callout of its own | Send callbacks in series; retry this one once the other has been answered. |
+| Client sees `409 TRANSACTION_ROLLBACK_ONLY` | A callback write failed with an error that is not retryable | Look at the code named in the message and fix that callback. |
+| `authtype` is `user` although no user acted now | The callout is part of a write-back inside the user's transaction, or a scheduled fire the user armed | Check `authexectype` and `authexecid` as well. See [Section 9.2](#92-auth-type-values). |
+| `authexectype` is `system` | The callout is part of a scheduled fire | Expected. `authid` is the principal that armed the timer. |
+| `authclaims` is missing | The executor has no roles: the `system` executor of a scheduled fire | Check `authexectype` before reading claims. |
+| `authtype` is `service`, not `service_account` | `service_account` is not a value the platform emits | Switch on `service`. |
+| Callout never arrives; dispatch fails | A principal's kind is unset or unrecognized | Dispatch fails closed rather than sending a bogus identity. Check how the originating request authenticated. |

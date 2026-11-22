@@ -1,0 +1,374 @@
+---
+title: "Cluster operations"
+description: "Operating a multi-node cyoda-go cluster: node ids, bind addresses, cluster status, node states, health checks, shutdown timing, secret rotation, the PostgreSQL connection budget and upgrades."
+sidebar:
+  order: 35
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import FromTheBinary from '../../../components/FromTheBinary.astro';
+
+<FromTheBinary topic="cluster" />
+
+This page covers what applies to every multi-node cyoda-go deployment,
+whatever the packaging. [Kubernetes](/run/kubernetes/) shows how the Helm
+chart sets most of it for you.
+
+A cluster runs on the PostgreSQL storage backend only. Every node is stateless
+and identical: there is no leader election and no shard ownership, and any node
+serves any HTTP or gRPC request. PostgreSQL is the only stateful component.
+Nodes find each other by gossip (SWIM, over HashiCorp `memberlist`) and route a
+request that belongs to another node's open transaction to that node. Three
+nodes is the usual minimum for high availability; the PostgreSQL connection
+budget (below) usually sets the upper bound, at around ten nodes.
+
+## Cluster settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CYODA_CLUSTER_ENABLED` | `false` | Turns clustering on. |
+| `CYODA_NODE_ID` | unset | This node's id. Required with clustering on, and distinct on every node. |
+| `CYODA_NODE_ADDR` | `http://localhost:8080` | This node's HTTP base URL, with scheme, as the other nodes reach it. |
+| `CYODA_GRPC_NODE_ADDR` | unset | This node's gRPC endpoint (`host:port`). Unset, peers use the host of `CYODA_NODE_ADDR` with their own `CYODA_GRPC_PORT`. |
+| `CYODA_GOSSIP_ADDR` | `:7946` | Gossip listen address, TCP and UDP. |
+| `CYODA_SEED_NODES` | empty | Comma-separated `host:port` gossip addresses of existing nodes to join. |
+| `CYODA_HMAC_SECRET` | unset | The cluster secret, hex-encoded; the same on every node. Required with clustering on. Accepts `_FILE`. |
+
+The full list, including the callout hand-over and proxy timeouts, is in
+[`cyoda help config cluster`](/help/config/cluster/).
+
+## Node ids
+
+**Every node needs its own `CYODA_NODE_ID`.** A callout handed from one node
+to another is sealed for the receiving node by its id, so two nodes sharing an
+id can open each other's hand-overs.
+
+- **At startup**, a node whose id a live node of the cluster already holds
+  keeps retrying for `CYODA_STARTUP_TIMEOUT` (default `30s`) and then refuses
+  to start. The log names `CYODA_NODE_ID`, the address the id was found at and
+  the seed it was learned from. The node that already holds the id keeps
+  serving. The retrying covers a node that crashed and came back at another
+  address: its peers reap the record of its previous life within seconds, and
+  the next attempt gets in.
+- **Once a node is serving**, the check no longer runs. An id claimed from a
+  second address is logged at `ERROR`, once per address, and both nodes keep
+  serving under the one id. This happens when two clusters that started
+  separately with overlapping ids later meet, for example after a network
+  policy change or a healed partition. Watch for that `ERROR` line; the fix is
+  to correct the id and restart the node that has the wrong one.
+
+**The node identity has a size limit.** `CYODA_NODE_ID`, `CYODA_NODE_ADDR` and
+`CYODA_GRPC_NODE_ADDR` together must fit in 406 bytes, because they travel in
+the gossip layer's 512-byte node metadata. A node whose identity does not fit
+refuses to start:
+
+```
+level=ERROR msg="failed to create gossip registry" pkg=cluster err="node identity needs 533 bytes of cluster metadata and the limit is 512: shorten CYODA_NODE_ID, CYODA_NODE_ADDR or CYODA_GRPC_NODE_ADDR"
+```
+
+The ids also appear in [cluster status](#cluster-status) and as
+`service.instance.id` in telemetry, so choose ids an operator can read: the
+Helm chart uses the pod name (`cyoda-0`, `cyoda-1`, …).
+
+## Bind addresses
+
+A node opens four listeners. The three that carry requests bind loopback
+(`127.0.0.1`) by default, so a node is reachable only from its own host until
+you say otherwise:
+
+| Listener | Port | Bind address variable | Serves |
+|---|---|---|---|
+| HTTP API | `8080` (`CYODA_HTTP_PORT`) | `CYODA_HTTP_BIND_ADDRESS` | REST API (including `/api/admin/*`), peer proxying |
+| gRPC | `9090` (`CYODA_GRPC_PORT`) | `CYODA_GRPC_BIND_ADDRESS` | Compute nodes, gRPC API, gRPC health check |
+| Admin | `9091` (`CYODA_ADMIN_PORT`) | `CYODA_ADMIN_BIND_ADDRESS` | `/livez`, `/readyz`, `/metrics` |
+| Gossip | `7946` | `CYODA_GOSSIP_ADDR` (`[host]:port`) | Cluster membership |
+
+In a cluster, the other nodes reach a node's HTTP and gRPC listeners: they
+proxy transaction-bound requests to the HTTP address and forward compute-node
+callbacks to the gRPC address. Set `CYODA_HTTP_BIND_ADDRESS` and
+`CYODA_GRPC_BIND_ADDRESS` to an address the peers reach (`0.0.0.0` on a
+multi-host cluster and in every container), and `CYODA_ADMIN_BIND_ADDRESS`
+likewise when a load balancer or the kubelet probes the node from outside.
+Every port is bound before the node serves anything; a port that cannot be
+bound stops the process with exit status `1`.
+
+<Aside type="caution" title="The probes cannot see an unreachable API port">
+`/readyz` is served on the admin listener. With only the admin listener
+reachable, `/readyz` passes while nothing reaches ports 8080 and 9090.
+</Aside>
+
+`CYODA_NODE_ADDR` and `CYODA_GRPC_NODE_ADDR` are what a node **advertises**,
+not what it binds. Nodes do not forward to an advertised address that resolves
+to loopback, link-local, unspecified (`0.0.0.0`) or multicast, so each node
+must advertise an address the others can route to. The default
+`CYODA_NODE_ADDR`, `http://localhost:8080`, is not one; a node advertising a
+loopback address is listed `DOWN` in cluster status even by itself.
+
+In mock IAM mode every caller is an admin. Keep a mock-mode node on loopback.
+
+## Cluster status
+
+`GET /api/platform/cluster` lists every node of the cluster and says whether
+the cluster is operational. It needs a platform operator, `ROLE_ADMIN` in the
+tenant `PLATFORM` (on-behalf-of tokens are refused), and is served over HTTP
+only. On a node that holds the signing key, `cyoda token` signs one:
+
+```bash
+TOKEN=$(cyoda token --tenant PLATFORM)
+curl -s -H @- 'http://localhost:8080/api/platform/cluster?waitForNodes=2' \
+  <<<"Authorization: Bearer $TOKEN"
+```
+
+A token for any other tenant is refused with `403 FORBIDDEN`
+(`platform operator required`). See [`cyoda help cli token`](/help/cli/token/).
+
+The node that serves the request asks every member of its gossip directory,
+itself included, for its status over the authenticated peer channel, in
+parallel. Each ask is bounded by `CYODA_PROXY_TIMEOUT` (default `30s`). A
+member that answers is `UP`; one that does not is `DOWN`, listed with the state
+its gossip metadata last named. A node that has left the directory is not
+listed.
+
+A healthy two-node cluster answers `200`:
+
+```json
+{
+  "counts": [{ "count": 2, "reachability": "UP", "state": "NORMAL" }],
+  "nodes": [
+    {
+      "clock": { "controllable": false, "version": 0, "writer": "" },
+      "database": true,
+      "id": "node-a",
+      "reachability": "UP",
+      "state": "NORMAL",
+      "version": "0.9.0"
+    },
+    {
+      "clock": { "controllable": false, "version": 0, "writer": "" },
+      "database": true,
+      "id": "node-b",
+      "reachability": "UP",
+      "state": "NORMAL",
+      "version": "0.9.0"
+    }
+  ],
+  "operational": true
+}
+```
+
+The same cluster just after `node-b` was killed answers `503`, with the same
+body shape:
+
+```json
+{
+  "counts": [
+    { "count": 1, "reachability": "UP", "state": "NORMAL" },
+    { "count": 1, "reachability": "DOWN", "state": "NORMAL" }
+  ],
+  "nodes": [
+    {
+      "clock": { "controllable": false, "version": 0, "writer": "" },
+      "database": true,
+      "id": "node-a",
+      "reachability": "UP",
+      "state": "NORMAL",
+      "version": "0.9.0"
+    },
+    { "id": "node-b", "reachability": "DOWN", "state": "NORMAL" }
+  ],
+  "operational": false
+}
+```
+
+Once gossip has evicted `node-b`, a few seconds later, it is no longer listed
+and the cluster reports operational again. Without clustering, the one entry
+has the id `local`.
+
+**Fields.**
+
+- `nodes` — one entry per member, in ascending `id` order. An `UP` node also
+  carries `database` (its store answered a ping), `version` (its build
+  version) and `clock` (its [platform clock](/help/clock/) setting).
+- `counts` — one item per combination of `reachability` and `state` present.
+- `operational` — `true` only when every node is `UP` and `NORMAL` with
+  `database` true, every node runs the same `version` with the same `clock`,
+  and, with `waitForNodes`, at least that many nodes are `UP` and `NORMAL`. An
+  extra `DOWN` node therefore still makes the cluster not operational.
+
+The response is `200` when `operational` is `true` and `503` when it is
+`false`. It never contains node addresses or error text; those go to the log
+of the node that saw them.
+
+**Query parameters.**
+
+- `waitForNodes` (integer, 1 to 1000) — answer once at least this many nodes
+  are `UP` and `NORMAL`. The node re-asks whenever the directory changes, and
+  at least once a second. Without it, the answer follows one round.
+- `timeoutMs` (integer, 1 to 600000, default 30000) — the longest wait for
+  `waitForNodes`. When it passes, the answer is the last complete round. It is
+  refused without `waitForNodes`.
+
+A parameter that is not an integer, is out of range, is unknown or is given
+twice is `400 BAD_REQUEST`, with `properties.parameter` naming it.
+
+`waitForNodes` is the check to run after a deployment or an upgrade: a `200`
+means the expected number of nodes are serving, on one version.
+
+## Node states
+
+Each node gossips its lifecycle state. The precedence is `UNHEALTHY` >
+`DRAINING` > `STARTING` > `NORMAL`, and no transition is undone.
+
+| State | Meaning |
+|---|---|
+| `STARTING` | The node is in gossip and still building. Nothing serves its peer route yet, so it is always listed `DOWN`. |
+| `NORMAL` | The node has finished building. Until its listeners open it is listed `DOWN` with state `NORMAL`, and `waitForNodes` keeps waiting for it. |
+| `DRAINING` | Shutdown has begun. `/readyz` fails from this point. |
+| `UNHEALTHY` | The node recovered a panic in engine or store work. It stays this way until it is replaced. |
+
+The `cyoda.cluster.member.count` gauge counts live members per state; see
+[`cyoda help telemetry`](/help/telemetry/).
+
+## Readiness and health
+
+| Check | Where | Answers |
+|---|---|---|
+| `GET /livez` | Admin port | `200 ok` while the admin server accepts connections. No other check; a node that recovered a panic still passes. |
+| `GET /readyz` | Admin port | `200 ready`; `503` from the start of shutdown and, permanently, after a recovered panic. |
+| `grpc.health.v1.Health/Check` | gRPC port | `SERVING` while `/readyz` answers `200`, `NOT_SERVING` otherwise. Service name `""` only; no token. |
+| `GET /health` | HTTP API | `200 {"status":"UP"}`, or `503 {"status":"DOWN"}` after a recovered panic. Stays `200` while draining. For people and scripts, not for orchestrators. |
+
+`/livez` and `/readyz` need no authentication. The admin listener starts only
+after storage is open and migrations have run, so during startup the probe is
+refused rather than answered. `cyoda health` calls `/readyz` with a 2-second
+timeout and exits `0` when the node is ready; use it as a container health
+check.
+
+Route load balancer health checks to `/readyz` (or the gRPC `Check` for a
+gRPC-only balancer).
+
+**A node that recovers a panic withdraws itself.** A recovered panic in engine
+or store work marks the node `UNHEALTHY`: `/readyz` and `GET /health` answer
+`503`, so the load balancer stops sending it new requests, while `/livez`
+still passes, so nothing restarts it into the same panic. Established
+connections and work forwarded by peers still reach it. It claims no
+scheduled task. Read the ticket id from the log, then replace the node.
+
+## Shutdown
+
+On the first `SIGTERM` or `SIGINT` a node advertises `DRAINING` and `/readyz`
+fails at once. Then:
+
+1. The scheduler stops claiming scheduled transitions, waits up to
+   `CYODA_SCHEDULER_SHUTDOWN_DRAIN` (default `20s`) for runs in progress, and
+   cancels the rest, except a run with a processor in flight that is not
+   declared `idempotent`. It then waits for every run to record its outcome
+   and hands back unfinished tasks.
+2. The HTTP, admin and gRPC servers drain in-flight requests, concurrently,
+   with a 10-second deadline each.
+3. Async search jobs get up to 5 seconds, the node leaves the cluster, storage
+   is closed and telemetry is flushed.
+
+An idle node exits in well under a second. The worst case from signal to exit
+is:
+
+```
+max(CYODA_SCHEDULER_SHUTDOWN_DRAIN + 10, callout deadline) + 100 seconds
+
+callout deadline = (1 + CYODA_RETRY_FIXED_NUM_RETRIES) × CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS
+                   + CYODA_DISPATCH_WAIT_TIMEOUT + CYODA_CALLOUT_HANDOVER_ALLOWANCE
+```
+
+At the defaults that is 130 seconds with no non-idempotent processor in
+flight, and 375 seconds with one. **Give the process supervisor at least that
+long** before it kills the node: the Helm chart sets
+`terminationGracePeriodSeconds: 390`. Raise it when you raise the drain, the
+retries, the answer limit, the dispatch wait or the hand-over allowance. A node
+killed before it records its runs' outcomes leaves those tasks to be taken over
+by another node after `CYODA_SCHEDULER_STALE_AFTER`.
+
+A second signal during the drain forces an immediate exit with code `2`,
+draining nothing. See [`cyoda help run`](/help/run/) (SHUTDOWN TIMING).
+
+## Rotating the cluster secret
+
+`CYODA_HMAC_SECRET` is the single root key for gossip encryption, node-to-node
+dispatch authentication and transaction-routing tokens. There is no versioned
+key, so nodes holding different secrets cannot work together: a node started
+with a different secret fails its gossip join and exits, and dispatch between
+mismatched nodes is refused with `403`.
+
+**Rotating it requires stopping the whole cluster**: stop every node, change
+the secret everywhere, start the cluster again. A rolling restart across a
+secret change is not possible. In-flight transactions and routing tokens do
+not survive; clients retry.
+
+Generate a secret as 32 random bytes in hex:
+
+```bash
+(umask 077; openssl rand -hex 32 | tr -d '\n' > hmac-secret)
+```
+
+## PostgreSQL connection budget
+
+Each node opens up to four PostgreSQL pools:
+
+| Pool | Size variable | Default | Used for |
+|---|---|---|---|
+| `main` | `CYODA_POSTGRES_MAX_CONNS` | `25` | Entity transactions and reads, search, `GET /scheduled-tasks` |
+| `scheduler` | `CYODA_POSTGRES_SCHEDULER_CONNS` | `10` | Scheduled-task claims and bookkeeping, async-search heartbeat and claim |
+| `heartbeat` | — | `1` | The scheduler heartbeat |
+| `model` | `CYODA_POSTGRES_MODEL_CONNS` | `8` | Model reads, schema extensions, model administration |
+
+That is up to **44 connections per node** at the defaults, so a three-node
+cluster can hold 132 and a ten-node cluster 440. `cyoda migrate`, which the
+Helm chart runs as a Job, opens up to 2 more while it runs. Check the total
+against the server's `max_connections`, less what other clients of the same
+PostgreSQL need; the PostgreSQL default of 100 is not enough for three nodes at
+these settings. Lower `CYODA_POSTGRES_MAX_CONNS` first if you must; the
+scheduler and model pools accept no value below `2`.
+
+The `cyoda.storage.pool.connections` gauge reports every pool, labelled by
+`pool` (`main`, `scheduler`, `heartbeat`, `model`); the other
+`cyoda.storage.pool.*` instruments cover the main pool. See
+[`cyoda help config database`](/help/config/database/) and
+[Storage engines](/run/storage-engines/#connection-pools).
+
+## Upgrades
+
+**A rolling upgrade is safe only when the release notes say so.** Otherwise,
+stop the cluster, upgrade, and start it again. Nodes of different versions
+may not interoperate: the upgrade from v0.8.4 to v0.9.0, for example, is not
+rolling, because in a mixed cluster a scheduled task can run twice (see the
+[v0.9.0 release notes](/releases/v0-9-0/)).
+
+A full-stop upgrade:
+
+1. Read the release notes for the target version, including its migrations
+   and their blocking windows ([Storage engines](/run/storage-engines/#migrations-and-maintenance-windows)).
+2. Stop every node and wait for each process to exit (see [Shutdown](#shutdown)).
+3. Apply the migrations once, with the new binary:
+   `cyoda migrate --timeout <duration>` against the database. Size the timeout
+   to the migration, not to the default of 5 minutes. A node that
+   auto-migrates at start does so within `CYODA_STARTUP_TIMEOUT` (default
+   `30s`), which suits small databases only.
+4. Start every node on the new version.
+5. Check `GET /api/platform/cluster?waitForNodes=<n>` for `200`: all nodes
+   `UP` and `NORMAL`, on one version.
+
+A rolling restart within one version is safe: restart one node at a time and
+wait for `/readyz` to pass on it before moving on. Transactions open on the
+restarting node abort, and their clients retry.
+
+For the binary and image upgrade routes, see [Install](/run/install/). For
+Kubernetes, see [Kubernetes](/run/kubernetes/#upgrades).
+
+## Related
+
+- [`cyoda help cluster`](/help/cluster/) — topology, discovery, transaction
+  routing, callouts across nodes, replay protection.
+- [`cyoda help run`](/help/run/) — health probes, signals, shutdown timing,
+  port layout.
+- [`cyoda help config cluster`](/help/config/cluster/) and
+  [`cyoda help config database`](/help/config/database/).
+- [Kubernetes](/run/kubernetes/) and [Helm values](/reference/helm/).

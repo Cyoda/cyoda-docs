@@ -24,6 +24,65 @@ The viewer supports the standard operations: browsing endpoints, inspecting
 request/response shapes, and try-it-out calls against an environment of your
 choice.
 
+## Contract rules
+
+These rules hold for every REST operation. `cyoda help openapi` and
+`cyoda help errors` give the full text.
+
+**The contract grows by addition only.** A later release can add a field, a
+member of a polymorphic type and an event type. Nothing published is renamed
+or removed: not a mapping key, not an `enum` value, not an event type. A value
+cyoda-go stops sending stays in the spec, and its description says that it is
+not sent.
+
+**A client must tolerate what it does not know.** A client generated from an
+earlier spec reads every later response if it:
+
+- ignores a field it does not know;
+- reads an object whose discriminator value it does not know as no object. An
+  audit event of an unknown kind is a `null` entry in `items`; an event of an
+  unknown type keeps its `eventType` and has `null` `data`.
+
+For a Jackson client, disable `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES`
+and `DeserializationFeature.FAIL_ON_INVALID_SUBTYPE`. With Jackson's defaults,
+one unknown field or event type fails the read of a whole page.
+
+**Polymorphic types have one form.** Each is a base schema with a
+discriminator and a `mapping` that names every member; each member includes the
+base with `allOf`, and every use of the type is a `$ref` to the base. A
+discriminator property is a plain string, not an `enum`, because its value set
+grows. The bases are `QueryConditionDto` (discriminated by `type`: `simple`,
+`lifecycle`, `array`, `group`, `function`), `AuditEventDto`,
+`StateMachineEventDto` and `ProcessorDefinitionDto`. Every condition position —
+search, async search, grouped statistics, conditional delete, workflow
+criteria — is a `$ref` to `QueryConditionDto`.
+
+**Request bodies are read strictly.** A body spells each member exactly as the
+spec declares it, once. A member in another letter case, an undeclared member,
+a member written twice, and anything after the JSON value are refused with
+`400` and the operation's error code. The detail names the member and its
+location as a JSON Pointer. Entity and message payloads are your data: no
+member there is unknown, but a member written twice is still refused.
+
+**Query parameters are read strictly.** An operation accepts only the
+parameters it declares. Any other name, another letter case included, is
+`400 BAD_REQUEST: unknown query parameter "…"` with the name in
+`properties.parameter`. A parameter other than an array may be given once. A
+date-time parameter (`pointInTime`, `fromUtcTime`, `toUtcTime`) is RFC 3339:
+fractional seconds after `.`, a two-digit hour, a bounded offset, never a bare
+date or an empty value.
+
+**Warnings travel in `Cyoda-Warning` headers.** A condition that did not fail
+the request — for example an entity run by the default workflow — is reported
+in a `Cyoda-Warning` response header, one per warning, percent-encoded UTF-8.
+
+**Errors are RFC 9457 problem details.** An error response is
+`application/problem+json`. Handle it by `properties.errorCode`, not by HTTP
+status; `properties.retryable` is `true` only when the request is safe to
+retry as sent. An unexpected server error (`500`) carries a `ticket` UUID, a
+declared member of `ProblemDetail`, for log correlation; share it when you
+report the problem. Other `5xx` responses, such as `503`, carry none.
+
 ## gRPC
 
 gRPC proto documentation is tracked upstream and will appear here once the

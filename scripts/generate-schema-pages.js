@@ -74,6 +74,18 @@ async function generateSchemaPages() {
     const componentImport = `${upLevels}../components/JsonSchemaViewer.tsx`;
     const schemaImport = `${upLevels}../schemas/${schemaFile.replace(/\\/g, '/')}`;
 
+    // Schemas composed with `allOf: [{ $ref }]` (every event builds on
+    // BaseEvent) inherit properties the viewer would otherwise never show.
+    const bases = resolveBases(schemasDir, schemaFile, schema);
+    const baseImports = bases
+      .map((b, i) => `import base${i} from '${upLevels}../schemas/${b.relPath}';`)
+      .join('\n');
+    const basesProp = bases.length
+      ? `\n  bases={[${bases
+          .map((b, i) => `{ name: ${JSON.stringify(b.name)}, url: ${JSON.stringify(b.url)}, category: ${JSON.stringify(b.category)}, schema: base${i} }`)
+          .join(', ')}]}`
+      : '';
+
     // Generate MDX content
     const mdxContent = `---
 title: ${schemaName}
@@ -82,25 +94,26 @@ description: ${schemaDescription}
 
 import JsonSchemaViewer from '${componentImport}';
 import schema from '${schemaImport}';
+${baseImports}
 
 # ${schemaName}
 
-${schemaDescription}
+${escapeMdx(schemaDescription)}
 
 ## Schema Viewer
 
 <JsonSchemaViewer
   schema={schema}
   name="${schemaName}"
-  category="${category}"
+  category="${category}"${basesProp}
   client:load
 />
 
 ## Description
 
-${schema.description || 'This schema defines the structure and validation rules for ' + schemaName + '.'}
+${escapeMdx(schema.description || 'This schema defines the structure and validation rules for ' + schemaName + '.')}
 
-${generatePropertiesSection(schema)}
+${generatePropertiesSection(schema, bases)}
 
 ${generateRelatedSchemasSection(category, schemaName)}
 `;
@@ -262,23 +275,100 @@ Navigate to any category above to explore the available schemas.
 /**
  * Generate a properties section from the schema
  */
-function generatePropertiesSection(schema) {
-  if (!schema.properties) {
+/**
+ * Escape schema prose for an MDX body. Descriptions come from the pinned
+ * cyoda-go release and may contain placeholders such as `<uuid>` or
+ * braces, which MDX would parse as JSX or expressions. Frontmatter is
+ * YAML, not MDX, and must not go through this.
+ */
+function escapeMdx(text) {
+  return String(text)
+    .replace(/</g, '&lt;')
+    .replace(/\{/g, '&#123;')
+    .replace(/\}/g, '&#125;');
+}
+
+function generatePropertiesSection(schema, bases = []) {
+  const ownList = propertyList(schema);
+  const inherited = bases
+    .map((b) => ({ base: b, list: propertyList(b.schema) }))
+    .filter((x) => x.list);
+  if (!ownList && inherited.length === 0) {
     return '';
   }
 
-  const required = schema.required || [];
   let section = '## Properties\n\n';
+  if (ownList) section += ownList;
+  for (const { base, list } of inherited) {
+    section += `\n### Inherited from [${base.name}](${base.url})\n\n${list}`;
+  }
+  return section;
+}
 
+function propertyList(schema) {
+  if (!schema.properties) {
+    return '';
+  }
+  const required = schema.required || [];
+  let list = '';
   for (const [propName, propDef] of Object.entries(schema.properties)) {
     const isRequired = required.includes(propName);
     const type = propDef.type || 'object';
-    const description = propDef.description || '';
-    
-    section += `- **${propName}** (${type}${isRequired ? ', required' : ''}): ${description}\n`;
+    const description = escapeMdx(propDef.description || '');
+    list += `- **${propName}** (${type}${isRequired ? ', required' : ''}): ${description}\n`;
   }
+  return list;
+}
 
-  return section;
+/**
+ * Page URL of a schema file, matching where this script writes its page:
+ * common/statemachine/WorkflowInfo.json -> /reference/schemas/common/statemachine/workflow-info/
+ */
+function schemaPageUrl(relPath) {
+  const dir = path.posix.dirname(relPath);
+  const urlName = path.posix
+    .basename(relPath, '.json')
+    .replace(/([a-z])([A-Z])/g, '$1-$2')
+    .toLowerCase();
+  return `/reference/schemas/${dir}/${urlName}/`;
+}
+
+/**
+ * Follow `allOf: [{ "$ref": "..." }]` entries (recursively, base-most last)
+ * to the schema files they name. A ref that leaves the schema tree or names
+ * a missing file fails the build rather than silently dropping fields.
+ */
+function resolveBases(schemasDir, schemaFile, schema, seen = new Set([toPosix(schemaFile)])) {
+  const bases = [];
+  for (const entry of schema.allOf || []) {
+    if (!entry || typeof entry.$ref !== 'string') continue;
+    const relPath = path.posix.normalize(
+      path.posix.join(path.posix.dirname(toPosix(schemaFile)), entry.$ref)
+    );
+    if (relPath.startsWith('..')) {
+      throw new Error(`${schemaFile}: allOf $ref ${entry.$ref} leaves the schema tree`);
+    }
+    if (seen.has(relPath)) continue;
+    seen.add(relPath);
+    const absPath = path.join(schemasDir, relPath);
+    if (!fs.existsSync(absPath)) {
+      throw new Error(`${schemaFile}: allOf $ref ${entry.$ref} not found (${relPath})`);
+    }
+    const baseSchema = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
+    bases.push({
+      relPath,
+      name: baseSchema.title || path.posix.basename(relPath, '.json'),
+      url: schemaPageUrl(relPath),
+      category: relPath.split('/')[0],
+      schema: baseSchema,
+    });
+    bases.push(...resolveBases(schemasDir, relPath, baseSchema, seen));
+  }
+  return bases;
+}
+
+function toPosix(p) {
+  return p.split(path.sep).join('/');
 }
 
 /**

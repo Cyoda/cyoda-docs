@@ -43,24 +43,21 @@ information. You need to know *why* it changed, *under what rules*, and what
 the world looked like before. That information has to be engineered into a
 normal database as an afterthought; an EDBMS makes it the default.
 
-## Two forms today
+## cyoda-go
 
-Cyoda ships in two closely related forms, with the same semantics:
-
-- **cyoda-go** — an open-source Go implementation, run as a local binary or a
-  small cluster. Backends are In-Memory, SQLite, or PostgreSQL, chosen at start.
-- **Cyoda Cloud** — a managed service backed by the Cassandra-based Cyoda
-  Platform Library. Horizontally scalable, multi-tenant, with enterprise
-  identity, observability, and provisioning.
-
-Applications written against one run against the other without rewriting the
-domain model.
+**cyoda-go** is the open-source Go implementation of Cyoda, run as a single
+binary or as a small cluster. Its storage backend is chosen at start:
+In-Memory, SQLite, or PostgreSQL. Commercial storage backends are also
+available; for those, contact Cyoda. Every backend implements the same
+entity, workflow, and API contracts, so an application runs on any of them
+without rewriting the domain model.
 
 ## The growth path
 
-You can start on a laptop in minutes and graduate — on your schedule — to a
-container, to Kubernetes, or to Cyoda Cloud as scale and operational needs
-demand. The entity, workflow, and API contracts do not change as you move.
+You can start on a laptop in minutes and move — on your schedule — to a
+container, to Kubernetes, or to a commercial backend as scale and operational
+needs demand. The entity, workflow, and API contracts do not change as you
+move.
 
 <GrowthPathDiagram />
 
@@ -70,7 +67,7 @@ demand. The entity, workflow, and API contracts do not change as you move.
   read.
 - [Entities and lifecycle](/concepts/entities-and-lifecycle/) — the state
   machine shape of an entity, including a worked example diagram.
-- Digital twins and the growth path — how the same application runs at every
-  tier. *(Coming as Concepts fills out.)*
+- [Digital twins and the growth path](/concepts/digital-twins-and-growth-path/)
+  — how the same application runs at every tier.
 - For per-engine operational characteristics and deployment guidance, see
   [Storage engines](/run/storage-engines/).

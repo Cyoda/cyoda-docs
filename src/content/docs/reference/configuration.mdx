@@ -29,44 +29,93 @@ export const configTopics = (() => {
 
 cyoda-go reads configuration from `CYODA_*` environment variables and
 from `.env`-format files. The model — how sources compose, how profiles
-work, and how secrets are mounted from files — is described below, and the
-authoritative key list (every variable, its type, its default) is mirrored
-in full under [All variables](#all-variables). The binary remains the
-source of truth: run `cyoda help config` to read it directly.
+work, how secrets are mounted from files, and what the server checks at
+startup — is described below, and the authoritative key list (every
+variable, its type, its default) is mirrored in full under
+[All variables](#all-variables). The binary remains the source of truth: run
+`cyoda help config` to read it directly.
 
 ## Sources and precedence
 
-Values resolve in this order, highest to lowest:
+The server, `cyoda migrate`, `cyoda token` and `cyoda health` load env files in
+this order, a later file overriding an earlier one:
 
-1. Shell environment
-2. `.env.{profile}` files (in `CYODA_PROFILES` declaration order; later profiles override earlier ones within their group)
-3. `.env` in the project directory
-4. User config file
-5. System config file
-6. Hardcoded defaults
+1. The system config.
+2. The user config, written by `cyoda init`.
+3. `./.env` in the working directory.
+4. Each `./.env.{profile}` in the working directory, in the order
+   `CYODA_PROFILES` names them.
+
+A variable set in the process environment wins over the same variable in any
+file, and a variable set nowhere takes its built-in default. A file that is
+missing, cannot be read, or is not valid env syntax is skipped as a whole.
 
 Format is `.env` only (godotenv-parsed). No TOML, no YAML, no `--config`
-flag. Subcommand flags (e.g. `cyoda init --force`) are operation-scoped
-and do not override server-runtime configuration.
+flag, and no configuration flags: `cyoda serve` takes no arguments.
+Subcommand flags (e.g. `cyoda init --force`) are operation-scoped and do not
+override server-runtime configuration.
 
-**User config path** varies by OS: `~/.config/cyoda/cyoda.env` (Linux,
-macOS with XDG), `%AppData%\cyoda\cyoda.env` (Windows). **System config**
-lives at `/etc/cyoda/cyoda.env` on POSIX.
+| File | Linux | macOS | Windows |
+|---|---|---|---|
+| System config | `/etc/cyoda/cyoda.env` | none | `%ProgramData%\cyoda\cyoda.env` |
+| User config | `$XDG_CONFIG_HOME/cyoda/cyoda.env`, else `~/.config/cyoda/cyoda.env` | same as Linux | `%AppData%\cyoda\cyoda.env` |
+
+The `.deb` and `.rpm` packages install the system config with
+`CYODA_STORAGE_BACKEND=sqlite`; `cyoda init` writes the same setting to the user
+config. With neither, the server runs on the in-memory backend.
 
 ## Profiles
 
-`CYODA_PROFILES` is comma-separated and evaluated in declaration order.
-Within a profile, regular `.env` precedence applies; across profiles,
-later entries in the list override earlier ones.
+`CYODA_PROFILES` is comma-separated and evaluated in declaration order:
+`CYODA_PROFILES=postgres,jwt` loads `.env.postgres`, then `.env.jwt`, so a
+later profile overrides an earlier one. It selects profile files only when it
+is set in the process environment, not when it is set in a file.
 
 ## Secrets via `_FILE` suffix
 
-Any variable that accepts a credential (Postgres URL, JWT signing key,
-metrics bearer, gossip HMAC, bootstrap client secret) accepts a
-companion `*_FILE` variable that reads from a mounted file. Trailing
-whitespace is stripped. The `_FILE` variant takes precedence when both
-are set — the pattern designed for Kubernetes Secrets and Docker
-secrets mounts.
+Four credential variables accept a companion `*_FILE` variable that reads the
+value from a mounted file:
+
+- `CYODA_JWT_SIGNING_KEY` / `CYODA_JWT_SIGNING_KEY_FILE`
+- `CYODA_HMAC_SECRET` / `CYODA_HMAC_SECRET_FILE`
+- `CYODA_POSTGRES_URL` / `CYODA_POSTGRES_URL_FILE`
+- `CYODA_METRICS_BEARER` / `CYODA_METRICS_BEARER_FILE`
+
+Trailing whitespace is stripped. The `_FILE` variant takes precedence when
+both are set, even when the `_FILE` variant comes from a file and the plain
+variable from the process environment; export `CYODA_X_FILE=` (empty) to block
+it. A `_FILE` path that is set but cannot be read stops startup. This is the
+pattern designed for Kubernetes Secrets and Docker secrets mounts.
+
+## Listeners and bind addresses
+
+The REST API, gRPC and admin listeners bind `127.0.0.1` by default
+(`CYODA_HTTP_BIND_ADDRESS`, `CYODA_GRPC_BIND_ADDRESS`,
+`CYODA_ADMIN_BIND_ADDRESS`), so a server started with no settings is reachable
+only from its own host. Set them to `0.0.0.0` (or `::`) when clients, compute
+nodes, cluster peers or a container's port mapping must reach the server; the
+Helm chart and the bundled compose file do. A bind address is a bare host
+without brackets (`::1`, not `[::1]`). In mock IAM mode, an HTTP or gRPC
+listener on an address other than loopback logs a WARN at startup. See
+[Docker](/run/docker/#bind-addresses) and
+[Cluster operations](/run/cluster-operations/).
+
+## Startup validation
+
+Settings are checked before any listener opens. A value the server does not
+accept stops startup rather than falling back to a default; the process exits
+non-zero and logs the setting and the rule it broke. For example:
+
+```text
+level=ERROR msg="startup failure" phase=config-validation error="CYODA_IAM_MODE=\"foo\" is not supported (expected \"mock\" or \"jwt\")"
+```
+
+Among the settings checked: `CYODA_IAM_MODE` (`mock` or `jwt`),
+`CYODA_IAM_MOCK_KIND` (`user`, `service` or `system`), the
+`CYODA_REQUIRE_JWT` contract, `CYODA_JWT_EXPIRY_SECONDS` (1–3600), an empty
+`CYODA_JWT_ISSUER`, the scheduler settings, and the timeouts and limits whose
+descriptions below say "startup fails otherwise". A port that cannot be bound
+also stops the process before it serves a request.
 
 ## All variables
 
@@ -87,7 +136,7 @@ the pinned cyoda-go configuration surface.
             <tr>
               <td><code>{v.name}</code></td>
               <td>{v.type || '—'}</td>
-              <td>{v.default ? <code>{v.default}</code> : '—'}</td>
+              <td>{v.default ? <code>{v.default}</code> : v.required ? <strong>required</strong> : '—'}</td>
               <td>{v.description}</td>
             </tr>
           ))}

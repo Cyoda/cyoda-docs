@@ -99,3 +99,36 @@ test('run: info.version in emitted JSON equals the pinned binary version', async
   fs.rmSync(tmpdir, { recursive: true });
   fs.rmSync(versionFile);
 });
+
+for (const [label, existingVersion, expectRefetch] of [
+  ['at the pinned version', 'test-pin', false],
+  ['from another pinned version', 'older-pin', true],
+]) {
+  test(`--if-missing: ${expectRefetch ? 're-fetches' : 'short-circuits'} when the spec is ${label}`, async () => {
+    const versionFile = tmpVersionFile('test-pin');
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyoda-openapi-test-'));
+    const outputJsonPath = path.join(tmpdir, 'openapi.json');
+    const outputYamlPath = path.join(tmpdir, 'openapi.yaml');
+    fs.writeFileSync(outputJsonPath, JSON.stringify({ info: { version: existingVersion } }));
+    fs.writeFileSync(outputYamlPath, 'existing: true\n');
+
+    let spawnCalled = false;
+    const stub = makeSpawnSync('test-pin');
+    await run({
+      fetch: async () => { throw new Error('fetch should not be called in fast-path'); },
+      spawnSync: (...a) => { spawnCalled = true; return stub(...a); },
+      versionFilePath: versionFile,
+      outputJsonPath,
+      outputYamlPath,
+      cacheDir: path.join(tmpdir, 'cache'),
+      ifMissing: true,
+      platformHint: { platform: 'darwin', arch: 'arm64' },
+    });
+
+    assert.equal(spawnCalled, expectRefetch);
+    assert.equal(JSON.parse(fs.readFileSync(outputJsonPath, 'utf8')).info.version, expectRefetch ? 'test-pin' : existingVersion);
+
+    fs.rmSync(tmpdir, { recursive: true });
+    fs.rmSync(versionFile);
+  });
+}

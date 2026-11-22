@@ -5,18 +5,26 @@ sidebar:
   order: 25
 ---
 
-import VendoredBanner from '../../../components/VendoredBanner.astro';
 import EntityTree from '../../../components/EntityTree.astro';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
-<VendoredBanner stability="upcoming" />
-
 <FromTheBinary topic="analytics" />
 
-Cyoda exposes an analytical SQL surface through a Trino connector. Every
-entity model is projected into a set of **virtual SQL tables** so that
-nested JSON/XML data can be queried with ordinary relational SQL — no
-pre-flattening required.
+:::caution[Not yet implemented in cyoda-go]
+Trino support is not yet implemented in cyoda-go. The `/sql/schema/*`
+management API is published in the [OpenAPI spec](/reference/api/) but not
+routed, so a cyoda-go server answers `404` to it. The implementation is
+tracked in
+[cyoda-go#382](https://github.com/Cyoda/cyoda-go/issues/382), and the
+query-side reference (dialect scope, push-down, isolation, performance) in
+[cyoda-go#83](https://github.com/Cyoda/cyoda-go/issues/83). This page
+describes the planned surface; names and shapes may change before it ships.
+:::
+
+The planned analytical SQL surface is a Trino connector. Every entity model
+is projected into a set of **virtual SQL tables** so that nested JSON/XML
+data can be queried with ordinary relational SQL — no pre-flattening
+required.
 
 This page documents the projection rules, the table naming convention, the
 column categories, the JSON-to-SQL type mapping, and how polymorphic fields
@@ -1161,7 +1169,9 @@ tables and columns.
 
 ### Via the HTTP API
 
-You can manage and inspect your SQL schemas using the REST API:
+The planned REST API manages and inspects SQL schemas. These endpoints
+are not yet routed in cyoda-go
+([cyoda-go#382](https://github.com/Cyoda/cyoda-go/issues/382)):
 
 - **Create default schema**: `PUT /sql/schema/putDefault/{schemaName}`
 - **Get schema**: `GET /sql/schema/{schemaId}`
@@ -1180,17 +1190,18 @@ The JDBC connection string follows this pattern:
 jdbc:trino://<trino-endpoint>:443/cyoda/<your_schema>
 ```
 
-where `<trino-endpoint>` is the host serving the Trino connector — on
-[Cyoda Cloud](/cyoda-cloud/), a managed endpoint per environment — and
+where `<trino-endpoint>` is the host serving the Trino connector and
 `your_schema` is the schema name you configured.
 
-For authentication credentials and technical-user setup, see
-[Authentication and identity](/concepts/authentication-and-identity/).
+Authentication uses a cyoda token, the only kind of bearer token cyoda-go
+accepts. An M2M client gets one from its tenant's token endpoint,
+`POST /api/tenants/{tenant}/oauth/token`; see
+[Authenticating applications](/build/authenticating-applications/).
 
 ## Gaps in this reference
 
-The following are intentionally not yet specified here and are tracked as
-upstream asks:
+The following are not yet specified here and are tracked upstream in
+[cyoda-go#83](https://github.com/Cyoda/cyoda-go/issues/83):
 
 - **Supported SQL dialect scope** — which Trino features are guaranteed
   supported versus best-effort.
@@ -1200,7 +1211,3 @@ upstream asks:
   concurrent transition writes.
 - **Performance envelope** — rows/sec scan rates, partitioning, and
   per-tenant query limits.
-
-See the
-[cyoda-go issue tracker](https://github.com/Cyoda/cyoda-go/issues?q=is%3Aissue+label%3Acyoda-docs)
-for progress.

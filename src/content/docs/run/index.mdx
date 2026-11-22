@@ -1,75 +1,62 @@
 ---
 title: "Run"
-description: "The cyoda-go packaging ladder — desktop, docker, kubernetes, and hosted Cyoda Cloud."
+description: "The cyoda-go packaging ladder — desktop, Docker and Kubernetes — and the storage engine each one runs."
 sidebar:
   order: 0
 ---
 
-Cyoda runs on the tier that fits the job. Every packaging runs the same
-application and the same workflow semantics; what changes is durability,
-fault tolerance, and operational cost. Pick your packaging by what
-you need to operate, not by what your app needs to do.
+Every packaging runs the same cyoda-go binary with the same application
+contract and the same workflow semantics. What changes is durability, fault
+tolerance and operational cost. Pick the packaging by what you need to
+operate, not by what your application needs to do.
+
+Start with [Install](/run/install/): every packaging begins with a verified
+binary or a container image pinned by digest.
 
 ## Pick your packaging
 
-|                  | In-Memory | SQLite        | PostgreSQL       | Cassandra        |
-|------------------|-----------|---------------|------------------|------------------|
-| **Desktop**      | ✓         | ✓ *(default)* |                  |                  |
-| **Docker**       | ✓         | ✓             | ✓                |                  |
-| **Kubernetes**   |           |               | ✓ *(production)* | ✓ *(Enterprise)* |
-| **Cyoda Cloud**  |           |               |                  | ✓ *(managed)*    |
+|                  | In-memory | SQLite        | PostgreSQL       |
+|------------------|-----------|---------------|------------------|
+| **Desktop**      | ✓         | ✓ *(default)* |                  |
+| **Docker**       | ✓         | ✓             | ✓                |
+| **Kubernetes**   |           |               | ✓ *(production)* |
 
-→ For per-engine durability, fault tolerance, and deployment scope, see [Storage engines](./storage-engines/).
+Multi-node clusters run on PostgreSQL only. For per-engine durability, fault
+tolerance and deployment scope, see [Storage engines](/run/storage-engines/).
+Commercial storage backends are also available; for those, contact Cyoda.
 
 ## When to pick what
 
-- **[Desktop](./desktop/)** — a single binary on a laptop or a small server.
-  In-memory for tests; SQLite as the default durable store. Right for
-  development, edge, IoT, and small-team self-hosting.
-- **[Docker](./docker/)** — the same binary containerised. Use it for
-  bespoke integrations, composition with other services, local PostgreSQL
-  runs, and CI pipelines.
-- **[Kubernetes](./kubernetes/)** — the production packaging for
-  self-hosted clusters. Active-active stateless cyoda-go pods behind a
-  load balancer with PostgreSQL as the only stateful dependency. Helm
-  chart ships from cyoda-go. The same Helm-deployed cluster, licensed
-  under **Enterprise**, runs against the Cassandra plugin for horizontal
-  write scale-out — same packaging, different storage tier.
-- **[Cyoda Cloud](/cyoda-cloud/)** — cyoda-go delivered as a managed
-  service (coming soon). Isolated Postgres environments on the shared
-  tier, with dedicated and Cassandra-backed enterprise tiers above.
-  Right when you do not want to operate the infrastructure yourself.
+- **[Desktop](/run/desktop/)** — a single binary on a laptop or a small
+  server. In-memory for tests; SQLite as the default durable store. Right for
+  development, edge and small single-node deployments.
+- **[Docker](/run/docker/)** — the same binary in a container. Use it for
+  compositions with other services, local PostgreSQL runs and CI pipelines.
+- **[Kubernetes](/run/kubernetes/)** — the production packaging for
+  self-hosted clusters: a StatefulSet of identical cyoda-go pods with
+  PostgreSQL as the only stateful dependency, deployed with the Helm chart
+  that ships with cyoda-go.
 
-## Moving between tiers
+[Cluster operations](/run/cluster-operations/) covers what applies to every
+multi-node deployment, whatever the packaging: node ids, bind addresses,
+cluster status, health checks, shutdown timing, the PostgreSQL connection
+budget and upgrades.
 
-The application does not change when you move. That is the whole point of
-the growth path: start on Desktop, containerise when integration demands
-it, cluster on Kubernetes when scale demands it, and switch to the
-Cassandra-backed tier — self-hosted under Enterprise or managed via
-Cyoda Cloud — when single-PG write capacity becomes the constraint.
+## Moving between packagings
+
+The application does not change when you move. Start on Desktop, move to a
+container when integration demands it, and cluster on Kubernetes when
+availability or load demands it. The entity, workflow and API contracts are
+the same at every step.
 
 See [Digital twins and the growth path](/concepts/digital-twins-and-growth-path/)
 for the decision framework.
 
-## License and editions
+## License
 
-Cyoda ships in three editions. Pick by how you want to consume it; the
-application contract is the same across all three.
+cyoda-go is Apache 2.0. Everything in [Build](/build/) and
+[Reference](/reference/) works against it, and it is free to use for
+development and production on the Desktop, Docker and Kubernetes packagings
+with the in-memory, SQLite or PostgreSQL storage engines.
 
-| Edition | License | Storage tiers | Status |
-|---|---|---|---|
-| **cyoda-go** | Apache 2.0 (OSS) | In-memory, SQLite, PostgreSQL | Generally available |
-| **Enterprise** | Commercial (self-hosted) | Cassandra-backed | Available — contact sales |
-| **Cyoda Cloud** | Commercial (hosted service) | Cassandra-backed | Beta — test/demo only; commercial SLAs planned |
-
-The **cyoda-go** binary — everything in [Build](/build/) and
-[Reference](/reference/) works against it — is Apache 2.0 and free to
-use for development and production on the Desktop, Docker, and
-Kubernetes packagings with the in-memory, SQLite, or PostgreSQL
-storage engines. The **Cassandra-backed** tier (horizontal scale for
-write volume and distributed `async` search) ships two ways: as a
-self-hosted **Enterprise** distribution — the same Kubernetes Helm
-chart, licensed for the Cassandra plugin — and as the hosted **Cyoda
-Cloud** managed service. Cyoda Cloud is currently a Beta for test and
-demonstration; production workloads on the Cassandra tier run under
-the Enterprise license today.
+Cyoda Cloud is being redesigned; see [Cyoda Cloud](/cyoda-cloud/).

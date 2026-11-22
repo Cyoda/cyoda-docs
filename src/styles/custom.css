@@ -361,6 +361,13 @@
   margin-bottom: var(--base-size-4, 0.25rem);
 }
 
+/* Properties a schema inherits through allOf (e.g. every event from BaseEvent). */
+.json-schema-viewer-wrapper .schema-inherited {
+  margin-top: var(--base-size-16, 1rem);
+  padding-top: var(--base-size-8, 0.5rem);
+  border-top: 1px solid var(--sl-color-hairline);
+}
+
 .json-schema-viewer-wrapper .schema-simple {
   padding: var(--base-size-16, 1rem);
 }

@@ -1,128 +1,157 @@
 ---
 title: "Authentication and identity"
-description: "OAuth 2.0 tokens, machine-to-machine credentials, on-behalf-of exchange, and external key trust — conceptually."
+description: "Who can call Cyoda, how an application acts for its users, and how every change records both the user it was for and the client that made it."
 sidebar:
   order: 50
 ---
 
-Cyoda is an OAuth 2.0 authorization server. All traffic to the platform — REST,
-gRPC, Trino — is authenticated with bearer tokens the platform issues. This
-page explains the identity concepts; the mechanics of configuring an IdP,
-rotating keys, and provisioning credentials live under Run.
+Only **machine-to-machine (M2M) clients** connect to Cyoda. Your users never
+call Cyoda directly. They sign in to your application. Your application
+decides what each user may do, then calls Cyoda for them. Cyoda records the
+user the application names and the client that made each call.
 
-## The platform issues tokens
+Cyoda has no per-user permissions and holds no user sessions. It does not
+verify the user an application names; it records what the client states.
+Like a database, Cyoda cannot protect data from an application that is itself
+compromised, so authorization of users stays in your application.
 
-Every request carries a JWT bearer token. Cyoda both **issues** tokens (as an
-OAuth 2.0 authorization server) and **validates** them on every API call. The
-token encodes the subject, the scopes, and the tenant the request belongs to;
-authorization is evaluated from the token, not from transport-level
-credentials.
+There is one exception to "only clients connect". The platform operator can
+sign a short-lived token offline with `cyoda token`, using the deployment's
+signing key. That is how the first admin token of a tenant comes into being.
 
-Clients obtain a token through an OAuth 2.0 flow appropriate to their role:
-end-user flows for people, M2M flows for services, on-behalf-of exchange for
-downstream calls.
+## Tokens are signed by Cyoda
+
+Every API call carries an `Authorization: Bearer <jwt>` header with a token
+that Cyoda signed with one of its own key pairs. Cyoda issues these tokens to
+M2M clients at a tenant-scoped token endpoint,
+`POST /api/tenants/{tenant}/oauth/token`. Each token names the tenant
+(`caas_org_id`), the principal, and the roles that authorization is evaluated
+against. A token from an identity provider is refused with `401`. So is a
+user assertion presented as a bearer token.
+
+Tokens are short-lived: 300 seconds by default and never more than an hour.
+There is no refresh token. A client fetches a new token when the old one is
+close to expiry.
 
 ## Machine-to-machine credentials
 
-Services authenticate to Cyoda using **client credentials** (`client_id` and
-`client_secret`). The platform issues tokens to those credentials and enforces
-the scopes associated with the service account. Use M2M credentials for any
-automated integration: ingest pipelines, compute nodes, back-office workers.
+An M2M client is a client id and a secret that belong to one **tenant**. The
+tenant admin creates clients through the IAM admin API. The client id is
+unique within the tenant and can be chosen at creation. The secret is shown
+once and can be reset, but never read again.
 
-Rotate credentials like any other secret; the lifetime and rotation cadence
-are enforced per environment.
+There are three kinds of client. Each kind uses one grant:
+
+| Client | Roles | Grant | Typical use |
+| --- | --- | --- | --- |
+| Plain | `ROLE_M2M` | `client_credentials` | Background jobs, scripts, compute nodes |
+| Admin | `ROLE_M2M`, `ROLE_ADMIN` | `client_credentials` | Provisioning the tenant's clients and trusted keys |
+| On-behalf-of | `ROLE_M2M` | token exchange | A backend that calls Cyoda for its signed-in users |
+
+The client authenticates to the token endpoint with HTTP Basic. A plain or
+admin client receives a token of its own, and its changes are recorded as the
+client's. Give each deployable part of an application (the backend, each
+compute-node service, each job) its own client. That way it can be rotated or
+revoked on its own, and the recorded executor names the part that made each
+change.
+
+`ROLE_M2M` is the only data permission. It reaches every data operation in
+the tenant, model and workflow import included. Treat every client secret as
+access to all of the tenant's data.
 
 ## On-behalf-of exchange
 
-When one service calls another on a user's behalf — a web app calling an API
-that calls a processor, for example — Cyoda supports **token exchange**. The
-calling service presents its own token plus the user's token and receives a
-new token scoped to the downstream call. This preserves the user identity
-through the chain without passing the original bearer token around. In
-practice, the calling service includes the user's JWT as the `subject_token`
-in a token-exchange request; the issued token carries both identities for
-downstream authorization.
+An **on-behalf-of client** acts for your application's users. It never uses
+`client_credentials`. Instead:
 
-The result: the audit trail records who the original user was at every hop,
-and each service still only sees a token scoped to what it is allowed to do.
+1. A tenant admin registers a **trusted key**: an RSA public key whose
+   private half stays with your backend.
+2. For each user, your backend signs a short **user assertion**. This is a
+   JWT whose `sub` is the user id, `caas_org_id` is the tenant, and `aud` is
+   Cyoda's issuer (`CYODA_JWT_ISSUER`, default `cyoda`). It lives at most 300
+   seconds. The `kid` header names the trusted key.
+3. The on-behalf-of client exchanges the assertion at the token endpoint
+   (RFC 8693 token exchange) and receives a Cyoda token for that user.
+
+The issued token's subject is the user, and its `act` claim names the client.
+It carries the **client's** roles, never the user's: any role claim in the
+assertion is ignored. An on-behalf-of token reaches data operations only. It
+never administers clients or keys, and it never opens a compute-node stream.
+
+The trusted key is used only to verify the assertion during the exchange.
+Cyoda does not accept the assertion, or any token it did not sign, on an API
+call.
+
+## Roles and administration
+
+- **`ROLE_M2M`.** Every data operation over HTTP and gRPC requires it. A token
+  without it gets `403 FORBIDDEN` (gRPC `PermissionDenied`) before the
+  operation runs.
+- **`ROLE_ADMIN`, tenant admin.** Manages the tenant's M2M clients and trusted
+  keys.
+- **Platform operator.** `ROLE_ADMIN` in the tenant named `PLATFORM`. Manages
+  the cluster's signing key pairs, the platform clock, cluster status and the
+  `/admin/*` runtime controls. No other tenant's admin can touch them.
+
+A tenant has no registry entry. It exists as soon as a token names it, and
+only the operator's `cyoda token --tenant <id>` can name a new tenant: a
+client's token always carries the client's own tenant.
 
 ## Principal kinds
 
-Every principal carries an **explicit kind**: `user`, `service`, or `system`.
-The kind is recorded when the principal is established, not inferred later from
-the roles it happens to carry. Compute nodes see it as the `authtype` attribute
-on dispatched CloudEvents, and the platform **fails a dispatch closed** rather
-than sending an unset or unrecognized kind downstream.
+Every principal has an explicit **kind**: `user`, `service` or `system`. The
+kind is recorded when the principal is established, never inferred from the
+roles it carries.
 
-- `user` — a person, authenticated through an end-user flow.
-- `service` — a machine-to-machine technical account.
-- `system` — an internal platform trigger with no user context.
+- `user`: a person. This is the user named in an on-behalf-of token, or the
+  operator's `cyoda token`.
+- `service`: an M2M client acting as itself.
+- `system`: Cyoda itself, the executor of a scheduled transition firing.
+
+The user id `system` is reserved in any letter case, so no caller can be
+recorded as the platform's own principal. Compute nodes receive the kinds on
+every callout. Dispatch fails closed: Cyoda sends no callout when either
+principal has no id or an unrecognized kind.
 
 ## Attribution is not authorization
 
-Some actions happen because of a user, but not *as* that user. A processor
-writing other entities in reaction to someone's transition, or a scheduled
-transition firing hours after the write that armed it, both run without a
-live user request behind them.
+Some actions happen because of a user, but not *as* that user. Examples are a
+processor writing other entities in reaction to someone's transition, a
+compute node writing back inside the user's transaction, or a scheduled
+transition firing hours after the request that armed it.
 
-Cyoda keeps the two concerns separate:
+Cyoda keeps the two concerns apart, and records both:
 
-- **Execution** uses system or service authority. Nobody is impersonated and no
-  user's permissions are borrowed. What the follow-on action is *allowed* to do
-  does not depend on who caused it.
-- **Attribution** records the principal captured server-side when the follow-on
-  was created — the transaction's origin for a cascade, propagated unchanged
-  through every joined write including a cross-node proxied join; the identity
-  that armed the timer for a scheduled fire.
+- The **attributed principal** is who the change is for: the user of an
+  on-behalf-of request, otherwise the caller. For a cascade it is the
+  transaction's origin, carried unchanged through every joined write. For a
+  scheduled firing it is the principal that armed the timer.
+- The **executor** is who actually made the change: the M2M client whose
+  token made the call, `system` for a scheduled firing, or the operator for a
+  `cyoda token` request.
 
-Origin is **platform-set only**. No request field and no worker input can
-declare it, so attribution cannot be spoofed by a caller or a compute node.
+What a follow-on action may do depends on the executor's roles, never on the
+user it is attributed to. The origin is set by the platform only. No request
+field and no compute node can declare it, so attribution cannot be spoofed by
+a caller.
 
-This matters when you read history. A change record carries both the attributed
-principal and the identity that actually executed it, so a service-executed
-cascade is never indistinguishable from a direct user action — see
-[the change history](/build/working-with-entities/#change-history). Before
-cyoda-go v0.8.3 the follow-on was recorded against whatever ran it: a cascade
-appeared as the compute service account, and a scheduled fire as a fabricated
-`"scheduler"` user, losing the human who set it off.
+Both principals appear wherever Cyoda records a change. Entity change history
+carries `user`, `attributedKind` and `executedBy`
+(see [the change history](/build/working-with-entities/#change-history)).
+Audit events carry `actor` and `executedBy`. Callouts carry
+`authtype`/`authid` for the attributed principal and
+`authexectype`/`authexecid` for the executor. A user-attributed change is
+therefore never indistinguishable from a direct user action: a check that
+means "this user approved now" also checks that the executor is your
+backend's on-behalf-of client.
 
-## External key trust and OIDC federation
+## Where to go next
 
-Cyoda can be configured to **trust tokens issued by external identity
-providers** — your corporate Okta, Auth0, Keycloak, Entra, or any
-spec-compliant OpenID Connect (OIDC) issuer. The platform validates tokens
-signed with keys it recognises, maps the external subject and roles onto an
-internal identity, and applies the local authorization rules. Users sign in
-with their organisation's single sign-on and receive entitlements within Cyoda.
-
-Trust is established **per tenant**. cyoda-go keeps a registry of OIDC
-providers: each registration pins an issuer — and optionally the audiences it
-will accept and the claim that carries roles — and the platform validates an
-incoming token against the local issuer first, then against the registered
-providers in turn. Where several tenants share one physical IdP, tokens are
-disambiguated by audience and ambiguous tokens are rejected rather than
-guessed, so one tenant can never borrow another's trust.
-
-Provider metadata — the JWKS used to verify signatures — is fetched from each
-issuer's OIDC discovery document, refreshed across the cluster, and guarded
-against server-side request forgery. A reload preserves existing key sources and
-re-warms every provider on every node; a warm-up that fails because the identity
-provider is unreachable retries every 30 seconds.
-
-## Where this is configured
-
-- **Self-hosted (cyoda-go).** Identity is managed through cyoda-go's IAM
-  admin API and configuration: bootstrap credentials, JWT signing keys,
-  machine-to-machine clients, and OIDC provider trust. See
-  [Reference → Identity and IAM](/reference/identity-and-iam/) for the
-  endpoints and the configuration that governs them, or run `cyoda help auth`
-  against your binary.
-- **Cyoda Cloud.** Identity is surfaced as a managed service:
-  [Cyoda Cloud → identity and entitlements](/cyoda-cloud/identity-and-entitlements/).
-
-## What your application does
-
-Applications do not implement OAuth 2.0 flows from scratch; they fetch a token
-using their client credentials (or accept one from a user session) and attach
-it to every Cyoda call. See [Build → working with entities](/build/working-with-entities/)
-for the client patterns.
+- [Authenticating your application](/build/authenticating-applications/)
+  walks through the whole integration step by step: clients, trusted keys,
+  the exchange, compute nodes and rotation.
+- [Identity and IAM](/reference/identity-and-iam/) is the reference for the
+  token endpoint, the admin endpoints and the configuration that governs
+  them.
+- [`cyoda help auth`](/help/auth/) is the canonical reference in the binary,
+  with every claim and every error.

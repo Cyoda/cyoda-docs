@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync as _spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { jsonFilesAtVersion } from './lib/pinned-output.js';
 
 import { parsePinFile, ensureBinary, err } from './lib/cyoda-binary.js';
 
@@ -50,9 +51,10 @@ function runBinaryCommand(spawnSync, binaryPath, args) {
  *
  * `type` and `default` are intentionally optional: real cyoda-go output leaves
  * `type` empty for some vars and omits `default` for many. Those render blank.
+ * `required` is set only on the few vars the server cannot start without.
  *
  * @param {any} raw
- * @returns {{schema:number, version:string, vars:Array<{name:string,topic:string,type:string,default:string,description:string}>}}
+ * @returns {{schema:number, version:string, vars:Array<{name:string,topic:string,type:string,default:string,description:string,required:boolean}>}}
  */
 export function normalizeConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -77,6 +79,7 @@ export function normalizeConfig(raw) {
       type: typeof v.type === 'string' ? v.type : '',
       default: v.default === undefined || v.default === null ? '' : String(v.default),
       description: typeof v.description === 'string' ? v.description : '',
+      required: v.required === true,
     };
   });
   vars.sort((a, b) =>
@@ -112,11 +115,10 @@ export async function run({
   platformHint,
   spawnSync = _spawnSync,
 }) {
-  if (ifMissing && fs.existsSync(outputPath)) {
+  const version = parsePinFile(versionFilePath);
+  if (ifMissing && jsonFilesAtVersion([outputPath], (j) => j.version, version)) {
     return;
   }
-
-  const version = parsePinFile(versionFilePath);
   console.log(`⚙️  Building configuration reference (pinned v${version})...`);
 
   const versionCacheDir = path.join(cacheDir, `v${version}`);
