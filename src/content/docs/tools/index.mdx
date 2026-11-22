@@ -13,12 +13,12 @@ cyoda-go.
 
 | Tool | What it is | Runs against |
 |---|---|---|
-| [Cyoda Skills](./cyoda-skills/) | Skill set for AI coding agents (Claude Code plugin) | cyoda-go, Cyoda Cloud |
+| [Cyoda Skills](./cyoda-skills/) | Skill set for AI coding agents (Claude Code plugin) | cyoda-go |
 | [Dev Console and model-editor MCP](./dev-console/) | Desktop app and MCP server for viewing and editing workflow and entity model files | Local files, no instance required |
 | [Workflow editor libraries](./workflow-editor/) | TypeScript packages to parse, render, and edit Cyoda workflow JSON | Your own application |
-| [Environment dashboard](./env-dashboard/) | Web UI for investigating and exploring a running environment | Cyoda Cloud; cyoda-go with a reduced feature set |
-| [Java client template](./java-client-template/) | Spring Boot template for Java/Kotlin Cyoda applications and compute nodes | Any Cyoda instance |
-| [Python client template and MCP](./python-client-template/) | Quart template for Python compute nodes, plus an MCP server for Cyoda instances | Any Cyoda instance |
+| [Environment dashboard](./env-dashboard/) | Web UI for investigating and exploring a running instance | cyoda-go in mock auth mode; JWT mode not yet supported |
+| [Java client template](./java-client-template/) | Optional Spring Boot scaffolding for Java/Kotlin Cyoda applications and compute nodes | cyoda-go; tenant token endpoint not yet supported |
+| [Python client template and MCP](./python-client-template/) | Optional Quart scaffolding for Python compute nodes, plus an MCP server for Cyoda instances | cyoda-go; tenant token endpoint not yet supported |
 
 ## Which tool for which job
 
@@ -34,9 +34,9 @@ cyoda-go.
   build them effectively from `cyoda help`, the
   [API reference](/reference/api/), and [Cyoda Skills](./cyoda-skills/).
   If you want an opinionated Java/Kotlin or Python starting point instead,
-  fork the [Java](./java-client-template/) or
-  [Python](./python-client-template/) template.
-- **Inspecting entities, workflows, and processing on a running
-  environment** — the [environment dashboard](./env-dashboard/).
+  the [Java](./java-client-template/) and
+  [Python](./python-client-template/) templates are optional scaffolding.
+- **Inspecting entities and workflows on a running instance** — the
+  [environment dashboard](./env-dashboard/).
 - **Showing or editing workflows in your own UI** — the
   [workflow editor libraries](./workflow-editor/).

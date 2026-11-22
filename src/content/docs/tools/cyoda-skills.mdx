@@ -1,6 +1,6 @@
 ---
 title: Cyoda Skills
-description: Skill set that teaches AI coding agents to set up, design, build, and debug Cyoda applications.
+description: Skill set that teaches AI coding agents to set up, design, build, test, deploy, and debug applications on cyoda-go.
 sidebar:
   order: 10
 ---
@@ -8,10 +8,12 @@ sidebar:
 Repository: [github.com/Cyoda/cyoda-skills](https://github.com/Cyoda/cyoda-skills)
 · Apache-2.0
 
-Cyoda Skills are reusable instructions that teach an AI coding agent how to
-provision a Cyoda instance, model entities, define workflows, implement
-compute processors, and test the result. Claude Code is the best-supported
-agent; the skill files are plain Markdown and can be read by any agent.
+Cyoda Skills are reusable instructions that teach an AI coding agent to work
+with a cyoda-go instance: start or connect to one, get API tokens, design
+entities and workflows, register them, write compute nodes, smoke-test the
+result, write deployment files, and diagnose failures. Claude Code is the
+best-supported agent. The same `cyoda/` directory is also a Gemini CLI
+extension, and the skill files are plain Markdown that any agent can read.
 
 ## Install
 
@@ -25,10 +27,14 @@ Install from the plugin marketplace:
 /reload-plugins
 ```
 
-Then start the guided journey:
+Then describe what you want to build. The agent loads the skills it needs,
+and they compose with the rest of your process. Each skill can also be
+started by typing its command, for example `/cyoda:design`.
+
+To pick up a new release:
 
 ```text
-/cyoda:app
+/plugin marketplace update cyoda
 ```
 
 ### Other agents
@@ -43,20 +49,61 @@ building, for example:
 
 | Skill | Purpose |
 |---|---|
-| `/cyoda:app` | Entry point — walks the full build journey |
-| `/cyoda:setup` | Install cyoda-go locally or connect to Cyoda Cloud |
-| `/cyoda:auth` | Authenticate to Cyoda Cloud (obtain a JWT) |
-| `/cyoda:design` | Design entities and workflows for an application |
-| `/cyoda:build` | Incrementally build and register entity models and workflows |
-| `/cyoda:compute` | Implement compute node processors and criteria services over gRPC |
-| `/cyoda:test` | Smoke-test a running instance |
-| `/cyoda:debug` | Diagnose failures and browse entity history |
-| `/cyoda:migrate` | Move an application from local cyoda-go to Cyoda Cloud |
-| `/cyoda:docs` | Look up Cyoda documentation |
-| `/cyoda:status` | Report the current connection status |
+| `/cyoda:setup` | Install and start cyoda-go locally, connect to a self-hosted instance, link a project to its instance, and report connection status |
+| `/cyoda:auth` | Get API tokens for a cyoda-go instance that is not in mock auth mode, and set up token handling in your own application |
+| `/cyoda:design` | Model a domain as entities and workflows, and review a design against the Cyoda best practices |
+| `/cyoda:build` | Incrementally build and register entity models and workflows, kept as versioned project files |
+| `/cyoda:compute` | Decide whether a compute node is needed, and implement processors, function criteria, and schedule functions over gRPC |
+| `/cyoda:test` | Smoke-test entity models and workflows on a running instance, or write a re-runnable smoke-test script |
+| `/cyoda:deploy` | Write Docker Compose or Helm files, seed and verify scripts, and a secrets checklist for a self-hosted cyoda-go |
+| `/cyoda:debug` | Diagnose errors, stuck entities, and failing compute nodes, and browse an entity's history and audit trail |
+| `/cyoda:docs` | Answer questions about cyoda-go APIs, configuration, error codes, and CLI commands from `cyoda help` |
 
-`/cyoda:docs` prefers `cyoda help` on the local binary, which is
-version-accurate, and falls back to this site.
+`design`, `build`, `compute`, and `debug` can offer a spike on a throwaway
+in-memory cyoda-go.
+
+## Where the facts come from
+
+The skills take API paths, field names, and behaviour from `cyoda help`, not
+from their own text, and name the help section each fact comes from. They
+look a topic up in this order:
+
+1. the bound instance, at `GET <endpoint>/api/help/<topic>`;
+2. the local binary, with `cyoda help <topic> --format=json`;
+3. the help mirror on this site, at `https://docs.cyoda.net/help/<topic>.md`.
+
+`/cyoda:docs` uses the rest of this site, through
+[`/llms.txt`](/llms.txt), only when help has no answer.
+
+## Connections and tokens
+
+The plugin keeps its connections in
+`~/.config/cyoda/cyoda-plugin-config.json`, outside any project:
+
+- **Profiles** — machine-wide connections, each with an `endpoint` and, on an
+  instance that is not in mock auth mode, a `tokenCommand`.
+- **Project links** — under `projects`, a project directory bound to its own
+  instance, so several projects with their own cyoda-go stacks can be worked
+  on at once. Inside a linked directory the link wins over the active
+  profile.
+
+`CYODA_PROFILE=<name>` selects a machine-wide profile over both.
+
+The file holds no tokens or secrets. Before each API call the plugin runs the
+`tokenCommand`, usually a `get-token.sh` script that `/cyoda:auth` writes into
+your project. The script reads the M2M client's credentials and tenant
+(`CYODA_TENANT`) from your environment or keychain and requests a token from
+the tenant's token endpoint. Whoever holds the instance's signing key can use
+`cyoda token` instead. See
+[Authenticating applications](/build/authenticating-applications/) for the
+access model.
+
+## Versioning
+
+The plugin's MAJOR.MINOR follows the cyoda-go release line it targets: plugin
+0.9.x is written for cyoda-go 0.9.x, and the patch number counts the plugin's
+own revisions. `/cyoda:setup` warns when the instance, or the local `cyoda`
+binary when there is no instance, runs a different line.
 
 ## Related
 
