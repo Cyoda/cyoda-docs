@@ -34,12 +34,20 @@ the authority for the version you run.
 ## How to use it
 
 ```bash
-cyoda help                          # browse the whole tree
-cyoda help <topic>                  # read one topic (e.g. `cyoda help search`)
-cyoda help <topic> <subtopic>       # drill down (e.g. `cyoda help search async`)
-cyoda help <topic> --format=json    # machine-readable
+cyoda help                           # browse the whole tree
+cyoda help <topic>                   # read one topic (e.g. `cyoda help search`)
+cyoda help <topic> <subtopic>        # drill down (e.g. `cyoda help config database`)
+cyoda help <topic>.<subtopic>        # the same, by dotted id (e.g. `cyoda help config.database`)
+cyoda help <topic> --format=json     # machine-readable
 cyoda help <topic> --format=markdown # default off-TTY — paste into docs, PRs, chat
+cyoda help <topic> <action>          # raw output of a topic action (e.g. `cyoda help openapi yaml`)
 ```
+
+A topic that does not exist exits with status `2`. Topic actions emit raw
+content rather than a help page and take no `--format`; the actions are
+`cyoda help openapi json|yaml|tags`, `cyoda help grpc json|proto`,
+`cyoda help cloudevents json`, `cyoda help config all` and
+`cyoda help workflows schema-version versions`.
 
 ## The tree
 

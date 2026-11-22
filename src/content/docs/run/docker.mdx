@@ -5,13 +5,16 @@ sidebar:
   order: 20
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="run" />
 
 Docker is the right packaging when you need cyoda-go to sit inside a larger
 composition — with your app, with a PostgreSQL backend, with an observability
-stack — or when your CI pipeline wants a clean container image per run.
+stack — or when your CI pipeline wants a clean container image per run. For
+production orchestration (several nodes, migrations as a Job, network
+policy), use the Helm chart; see [Kubernetes](/run/kubernetes/).
 
 ## When Docker fits
 
@@ -26,48 +29,197 @@ stack — or when your CI pipeline wants a clean container image per run.
 
 ## Image
 
-cyoda-go publishes container images per release. The authoritative reference
-and pull instructions live in the
-[cyoda-go Docker reference](https://github.com/Cyoda/cyoda-go/tree/main/deploy/docker).
+The image is `ghcr.io/cyoda/cyoda`. Each release is tagged with its version
+without the `v` (for example `0.9.0`), and `latest` is the newest release that
+is not a pre-release. The release workflow signs the image. A tag can be moved,
+so verify the signature of the release you want and run the image by the
+digest the check prints; [Install → Container image](/run/install/#container-image)
+has the `cosign` command. The examples below use `$D` for that digest.
 
-## Compose example
+The image is built on `gcr.io/distroless/static`. The binary is `/cyoda`, the
+entrypoint, with no default arguments: the server starts with no arguments,
+and subcommands (`token`, `health`, `migrate`, `help`) are passed as the
+container command. The container runs as the non-root user `65532:65532`.
+Exposed ports are `8080` (REST API), `9090` (gRPC) and `9091` (admin).
 
-The repository ships a minimal `compose.yaml` for getting a single node and
-PostgreSQL up, plus a richer
-[compose-with-observability](https://github.com/Cyoda/cyoda-go/tree/main/examples/compose-with-observability)
-example that wires tracing and metrics.
+## Bind addresses
 
-Use these as templates rather than retyping them here — they track the
-cyoda-go release and we link whichever is current.
+Every listener binds `127.0.0.1` by default. Inside a container that is the
+container's own loopback, which Docker's port mapping does not forward to, so
+a container must set **all three** bind addresses to `0.0.0.0`:
+
+- `CYODA_HTTP_BIND_ADDRESS` — the REST API on 8080;
+- `CYODA_GRPC_BIND_ADDRESS` — gRPC on 9090, for compute nodes;
+- `CYODA_ADMIN_BIND_ADDRESS` — the probes and metrics on 9091.
+
+Without them the published ports accept no connection. Publish the ports on
+the host's loopback (`-p 127.0.0.1:8080:8080`) unless something in front of
+cyoda-go authenticates callers: in mock IAM mode every caller is an admin, and
+the server logs a WARN at startup when a mock-mode listener is not on
+loopback. Any other container on the same Docker network can reach the
+container-side ports.
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9091:9091 \
+  -e CYODA_STORAGE_BACKEND=sqlite \
+  -e CYODA_SQLITE_PATH=/var/lib/cyoda/cyoda.db \
+  -e CYODA_HTTP_BIND_ADDRESS=0.0.0.0 \
+  -e CYODA_GRPC_BIND_ADDRESS=0.0.0.0 \
+  -e CYODA_ADMIN_BIND_ADDRESS=0.0.0.0 \
+  -v cyoda-data:/var/lib/cyoda \
+  "ghcr.io/cyoda/cyoda@$D"
+```
+
+Without `CYODA_STORAGE_BACKEND`, the container runs on the in-memory backend:
+the image ships no config file.
+
+## Compose
+
+The repository ships one compose file,
+[`deploy/docker/compose.yaml`](https://github.com/Cyoda/cyoda-go/blob/v0.9.0/deploy/docker/compose.yaml):
+a single cyoda service on **SQLite with mock auth**, the three bind addresses
+set to `0.0.0.0`, the ports published on host loopback, a named volume
+`cyoda-data` for the database, and a healthcheck that runs `/cyoda health`. It
+reads the image from `CYODA_IMAGE`, defaulting to `ghcr.io/cyoda/cyoda:latest`;
+run the image you verified by digest:
+
+```bash
+curl -O https://raw.githubusercontent.com/Cyoda/cyoda-go/v0.9.0/deploy/docker/compose.yaml
+CYODA_IMAGE="ghcr.io/cyoda/cyoda@$D" docker compose up
+```
+
+`docker compose down` stops it; `docker compose down -v` also deletes the data.
+The file is meant as a reference to copy from into your own compose stack.
+
+PostgreSQL and an observability stack appear only in the separate
+[`examples/compose-with-observability`](https://github.com/Cyoda/cyoda-go/tree/v0.9.0/examples/compose-with-observability)
+example: cyoda-go on PostgreSQL with a bundled Grafana, Prometheus and Tempo
+(`grafana/otel-lgtm`). It is a development convenience with dev credentials
+and unauthenticated Grafana, not a production template.
+
+### JWT mode in compose
+
+The compose file carries the JWT settings commented out. To enable them, mount
+the signing key as a file and point `CYODA_JWT_SIGNING_KEY_FILE` at it:
+
+```yaml
+services:
+  cyoda:
+    environment:
+      CYODA_IAM_MODE: jwt
+      CYODA_REQUIRE_JWT: "true"
+      CYODA_JWT_SIGNING_KEY_FILE: /run/secrets/signing.pem
+    volumes:
+      - ./secrets/signing.pem:/run/secrets/signing.pem:ro
+```
+
+Do not pass the PEM inline in `CYODA_JWT_SIGNING_KEY`: multi-line PEM does not
+survive compose interpolation reliably, and an inline value shows in
+`docker inspect`. On a Linux host the file must be readable by UID 65532 and
+by no one else:
+`sudo chown 65532:65532 secrets/signing.pem && sudo chmod 0400 secrets/signing.pem`.
+
+### First admin token
+
+In JWT mode the container already holds the signing key, so `cyoda token` run
+inside it signs the first admin token:
+
+```bash
+TOKEN=$(docker compose exec -T cyoda /cyoda token --tenant acme)
+```
+
+With `docker run`, use `docker exec <container> /cyoda token --tenant acme`.
+The token carries `ROLE_ADMIN` only. Use it to create the M2M clients that
+applications and compute nodes connect with (`POST /api/clients`); add
+`--roles ROLE_ADMIN,ROLE_M2M` for a token that also reaches data. See
+[Authenticating applications](/build/authenticating-applications/) and
+[`cyoda help cli token`](/help/cli/token/).
 
 ## PostgreSQL backend
 
-Point cyoda-go at a PostgreSQL instance by setting `CYODA_STORAGE_BACKEND=postgres`
-and the usual connection variables (or `*_FILE` forms for secrets). The DSN
-goes in `CYODA_POSTGRES_URL` (or `CYODA_POSTGRES_URL_FILE` for a file-mounted
-secret per Docker conventions). The Docker compose example wires this up
-end-to-end; for production you will run PostgreSQL separately and pass only
-the DSN.
+Point cyoda-go at PostgreSQL with `CYODA_STORAGE_BACKEND=postgres` and the DSN
+in a file mounted into the container, referenced by `CYODA_POSTGRES_URL_FILE`.
+A credential passed with `-e` shows in `docker inspect` and in shell history.
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9091:9091 \
+  -e CYODA_STORAGE_BACKEND=postgres \
+  -e CYODA_POSTGRES_URL_FILE=/run/secrets/postgres-url \
+  -v /path/to/postgres-url:/run/secrets/postgres-url:ro \
+  -e CYODA_IAM_MODE=jwt \
+  -e CYODA_REQUIRE_JWT=true \
+  -e CYODA_JWT_SIGNING_KEY_FILE=/run/secrets/signing.pem \
+  -v /path/to/signing.pem:/run/secrets/signing.pem:ro \
+  -e CYODA_HTTP_BIND_ADDRESS=0.0.0.0 \
+  -e CYODA_GRPC_BIND_ADDRESS=0.0.0.0 \
+  -e CYODA_ADMIN_BIND_ADDRESS=0.0.0.0 \
+  "ghcr.io/cyoda/cyoda@$D"
+```
+
+The file `postgres-url` holds the DSN
+(`postgres://user:pass@host:5432/db?sslmode=require`). Each node opens up to
+44 PostgreSQL connections at the defaults, and schema migrations run when the
+node starts; see [Storage engines](/run/storage-engines/).
+
+## Health and readiness
+
+The deployment probes are on the admin port (default `9091`), without
+authentication:
+
+- `GET /livez` — `200 ok` while the admin server accepts connections.
+- `GET /readyz` — `200 ready` while the node can serve. It answers `503` from
+  the start of shutdown, so a load balancer stops sending a draining node new
+  requests, and permanently once the node has recovered a panic in engine or
+  store work.
+
+```bash
+curl http://localhost:9091/readyz
+```
+
+The compose healthcheck runs `/cyoda health`, which calls `/readyz` with a
+2-second timeout and exits `0` when it answers `200`. The admin listener starts
+only after storage is open and migrations have run, so during startup the
+probe is refused rather than answered; raise the healthcheck's `start_period`
+when PostgreSQL migrations take longer than 30 seconds.
+
+gRPC clients and probes use the standard `grpc.health.v1.Health/Check` on the
+gRPC port, with no token: it answers `SERVING` while `/readyz` answers `200`,
+and `NOT_SERVING` otherwise.
+
+`GET /api/health` on the API port reports only the panic latch
+(`{"status":"UP"}` or `503 {"status":"DOWN"}`); it stays `200` while the node
+drains, so it is not a deployment probe.
+
+A recovered panic marks the node unhealthy for good: `/readyz` and
+`/api/health` answer `503`, `/livez` keeps passing, so an orchestrator stops
+routing to the node without restarting it. Replace the container.
+
+On `SIGTERM` (`docker stop`) the node drains its scheduled work and in-flight
+requests before exiting, which can take longer than Docker's default
+10-second stop timeout; set `--stop-timeout` (or `stop_grace_period` in
+compose) to cover it. For the timings, see
+[Cluster operations](/run/cluster-operations/).
 
 ## Observability
 
-The container emits structured logs to stdout, exposes a Prometheus scrape
-endpoint for metrics, and accepts OpenTelemetry configuration for traces.
-The observability example demonstrates a full loop:
+- **Logs** — structured, to stdout.
+- **Metrics** — Prometheus scrape at `/metrics` on the admin port. Set
+  `CYODA_METRICS_BEARER_FILE` to require a bearer token on it.
+- **Traces** — set `CYODA_OTEL_ENABLED=true` and the standard
+  `OTEL_EXPORTER_OTLP_*` variables.
 
-- **Logs** — stream from the cyoda-go container.
-- **Metrics** — Prometheus scrapes the admin port.
-- **Traces** — OTLP exporter configured via environment.
-
-Tune sampling and log level at runtime via the admin endpoints;
-see the
-[cyoda-go observability reference](https://github.com/Cyoda/cyoda-go#observability).
-
-Health probes live on the admin port (default 9091): `/livez` (liveness) and
-`/readyz` (readiness). Both are unauthenticated. A node that recovers a panic in
-engine or store work marks itself permanently unhealthy. `/readyz` and
-`/health` then report `503`, and `/livez` continues to pass. An orchestrator
-therefore stops routing to the node, and it does not restart it.
+Log level and trace sampling can be changed at runtime through
+`/api/admin/log-level` and `/api/admin/trace-sampler` on the **API** port.
+They need a platform operator (`ROLE_ADMIN` in the tenant `PLATFORM`, for
+example a token from `cyoda token --tenant PLATFORM`) and change only the node
+that answers. See [`cyoda help admin`](/help/admin/) and
+[`cyoda help telemetry`](/help/telemetry/).
 
 Three receive-side HTTP timeouts apply to the API server and to the admin
 server: `CYODA_HTTP_READ_HEADER_TIMEOUT` (`10s`), `CYODA_HTTP_READ_TIMEOUT`
@@ -77,8 +229,12 @@ its response.
 
 ## Data directory
 
-The container pre-stages `/var/lib/cyoda` as the data directory (with the
-correct ownership for the non-root `65532:65532` user). Mount it as a named
-volume if you want SQLite data or any plugin state to persist across
+The image pre-stages `/var/lib/cyoda` as the data directory, owned by the
+non-root user `65532:65532`. Mount a named volume there and set
+`CYODA_SQLITE_PATH=/var/lib/cyoda/cyoda.db` to keep SQLite data across
 container restarts.
 
+<Aside type="note">
+The bundled compose file runs mock auth. Before anything other than your own
+host can reach it, switch to JWT mode as above.
+</Aside>

@@ -1,155 +1,257 @@
 ---
 title: "Kubernetes"
-description: "Deploy cyoda-go with the Helm chart for clustered PostgreSQL-backed production."
+description: "Deploy a PostgreSQL-backed cyoda-go cluster on Kubernetes with the Helm chart."
 sidebar:
   order: 30
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="helm" />
 
-Kubernetes is the recommended production packaging for self-hosted cyoda-go.
-The application is designed for active-active stateless deployment: three to
-ten cyoda-go pods behind a load balancer, with PostgreSQL as the only
-stateful dependency.
-
-## When Kubernetes fits
-
-- **Production workloads** that need high availability.
-- **Multi-node clustering** with rolling upgrades and blue/green.
-- **Horizontal scale** up to the PostgreSQL backend's limits (10+ stateless
-  pods serving one PostgreSQL cluster is a comfortable envelope).
-- **Enterprise operations** — GitOps, secrets management, service meshes.
+Kubernetes is the production packaging for self-hosted cyoda-go. The Helm
+chart that ships with cyoda-go runs a StatefulSet of identical, stateless
+cyoda-go pods against an external PostgreSQL database, which is the only
+stateful dependency. This page covers the deployment shape, installation, the
+first admin token, upgrades and sizing. [Cluster operations](/run/cluster-operations/)
+covers what applies to any cluster, and [Helm values](/reference/helm/) covers
+the chart's values.
 
 ## Deployment shape
 
 ```
-          ┌─────────────┐
-          │ Load        │
-          │ Balancer    │
-          └──────┬──────┘
-                 │
-        ┌────────┼────────┐
-        │        │        │
-   ┌────▼─┐ ┌────▼─┐ ┌────▼─┐
-   │cyoda │ │cyoda │ │cyoda │   (stateless, 3–10 pods)
-   │-go   │ │-go   │ │-go   │
-   └────┬─┘ └────┬─┘ └────┬─┘
-        │        │        │
-        └────────┼────────┘
-                 │
-          ┌──────▼──────┐
-          │ PostgreSQL  │  (the only stateful dependency)
-          └─────────────┘
+        Gateway (HTTPRoute :8080, GRPCRoute :9090) or Ingress
+                              │
+                 Service cyoda (ClusterIP: 8080, 9090, 9091)
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+   ┌────▼────┐           ┌────▼────┐           ┌────▼────┐
+   │ cyoda-0 │◄─────────►│ cyoda-1 │◄─────────►│ cyoda-2 │   StatefulSet
+   └────┬────┘  gossip   └────┬────┘  gossip   └────┬────┘   (headless Service, :7946)
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+                     ┌────────▼────────┐
+                     │   PostgreSQL    │   external; the only stateful dependency
+                     └─────────────────┘
 ```
 
-Every pod is identical; any pod can serve any request. There is no leader
-election, no ZooKeeper, no etcd. Coordination happens through PostgreSQL's
-SERIALIZABLE isolation for writes and a gossip protocol (HMAC-authenticated)
-for membership, so concurrent writers never silently corrupt data.
+Every pod is identical, and any pod serves any request. There is no leader
+election and no external coordination service. Correctness comes from
+PostgreSQL: every transaction runs under `REPEATABLE READ` (snapshot
+isolation), with first-committer-wins validation at commit. Gossip, encrypted
+with the cluster's HMAC secret, provides peer awareness, and a request that
+belongs to another pod's open transaction is proxied to that pod.
 
-The stateful backend is pluggable: PostgreSQL (OSS default) or the
-commercial Cassandra storage engine. The pod topology and the application
-contract are identical either way — only the storage plugin configuration
-differs.
+The chart renders:
 
-## Helm chart
+| Object | Notes |
+|---|---|
+| `StatefulSet` | The cyoda pods. `podManagementPolicy: Parallel`, no volume claims, non-root, read-only root filesystem. `terminationGracePeriodSeconds: 390`. |
+| `Service` | `ClusterIP` by default; ports `8080` (HTTP), `9090` (gRPC), `9091` (admin and metrics). |
+| Headless `Service` | Gossip on `7946` TCP and UDP; gives each pod a stable DNS name. Publishes not-ready addresses so peers find each other before readiness. |
+| `ConfigMap` | Non-secret settings, including all three bind addresses set to `0.0.0.0`, JWT mode, the PostgreSQL backend and the seed list. |
+| Migration `Job` | Runs `cyoda migrate` as a pre-install and pre-upgrade hook. Mounts only the database DSN. |
+| `HTTPRoute`, `GRPCRoute` | With `gateway.enabled=true` (the default). Attach to a Gateway you provide in `gateway.parentRefs`. |
+| `Ingress` (HTTP and gRPC) | With `ingress.enabled=true` instead of the Gateway routes. |
+| `NetworkPolicy` | On by default. Restricts the admin port to the namespaces you name and gossip to the chart's pods. |
+| `PodDisruptionBudget` | On by default when more than one replica is possible; `minAvailable: 1`. |
+| `Secret` (HMAC, metrics bearer) | Generated on first install unless you name existing Secrets. |
+| `ServiceMonitor` | With `monitoring.serviceMonitor.enabled=true`. |
+| `HorizontalPodAutoscaler` | With `autoscaling.enabled=true`. |
+| `ServiceAccount` | With `serviceAccount.create=true` (the default). |
 
-cyoda-go ships a Helm chart under
-[`deploy/helm`](https://github.com/Cyoda/cyoda-go/tree/main/deploy/helm).
-The chart provisions the cyoda-go Deployment, a Service, a ConfigMap for
-non-sensitive configuration, and Secret references for credentials.
+Cluster mode is always on. At one replica the pod runs as a cluster of one.
+Each pod's `CYODA_NODE_ID` is its pod name (`cyoda-0`, `cyoda-1`, …), and its
+`CYODA_NODE_ADDR` is its headless-Service DNS name on port 8080, so ids are
+unique and fit the identity limit for any normal release name and namespace.
 
-The authoritative values reference lives under
-[Reference → Helm values](/reference/helm/); the chart's own `values.yaml`
-remains the runtime source of truth.
+## Install
 
-The Helm chart auto-generates the HMAC secret unless
-`cluster.hmacSecret.existingSecret` is provided. GitOps deployments should
-always set `existingSecret` to avoid Helm rendering a fresh secret on every
-reconcile, which would cause inter-node auth to drift.
+The chart requires Kubernetes 1.31 or later and is published to the Helm
+repository `https://cyoda.github.io/cyoda-go` as `cyoda/cyoda`. A chart
+release normally carries the version of the cyoda-go release it runs.
 
-## High availability
+Create the namespace and the two Secrets the chart requires (the PostgreSQL
+DSN and the JWT signing key) before you install. Keep secrets off the command
+line:
 
-- **Load balancer.** Any Kubernetes-native L4 or L7 will do; match the pod
-  readiness probe to the one the chart exposes.
-- **Readiness and liveness probes.** Both are wired by default; tune if
-  your control plane has stricter latency budgets.
-- **A node that panics withdraws itself and stays down.** See
-  [a panicked node withdraws itself](#a-panicked-node-withdraws-itself).
-- **Pod Disruption Budgets.** Set a minimum available count that matches
-  your replica count minus one so rolling upgrades and node drains do not
-  take the service below quorum.
+```bash
+kubectl create namespace cyoda
 
-### A panicked node withdraws itself
+(umask 077; printf '%s' 'postgres://cyoda:secret@pg-host:5432/cyoda?sslmode=require' > pg-dsn)
+kubectl create secret generic cyoda-pg -n cyoda --from-file=dsn=pg-dsn
+rm pg-dsn
 
-A recovered panic in engine or store work marks the node permanently unhealthy.
-`/health` reports `503 DOWN` and `/readyz` reports `503`, so Kubernetes removes
-the pod from its Service in approximately 10 to 15 seconds. `/livez` still
-passes, so Kubernetes does not restart the pod.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out signing.pem
+kubectl create secret generic cyoda-jwt -n cyoda --from-file=signing-key.pem=signing.pem
 
-Two things keep running in the meantime. Peer-forwarded work still arrives, and
-established connections stay open. Read the ticket id from the log, then
-replace the pod.
+helm repo add cyoda https://cyoda.github.io/cyoda-go
+helm repo update
+helm install cyoda cyoda/cyoda \
+  --namespace cyoda \
+  --set postgres.existingSecret=cyoda-pg \
+  --set jwt.existingSecret=cyoda-jwt \
+  --set "gateway.parentRefs[0].name=prod-gateway" \
+  --set "gateway.parentRefs[0].namespace=gateway-system"
+```
+
+With `gateway.enabled=true`, the default, `gateway.parentRefs` is required:
+an empty or missing list fails the install. On a cluster without Gateway API,
+replace the two `gateway.parentRefs` lines with `--set gateway.enabled=false`
+and use Ingress or the Service directly.
+
+**Pin the image by digest.** The chart runs `image.repository:image.tag`, and
+the tag defaults to the chart's app version. Tags can move, so for production
+verify the release's image signature and set `image.tag` to
+`<version>@<digest>`, for example `--set image.tag="0.9.0@$D"`. See
+[Install](/run/install/).
+
+<Aside type="caution" title="GitOps and dry runs">
+The chart generates the HMAC and metrics-bearer Secrets with `lookup`, which
+needs live cluster access. Rendered without it (`helm template`, `--dry-run`,
+Argo CD), the chart fails unless `cluster.hmacSecret.existingSecret` and
+`monitoring.metricsBearer.existingSecret` name Secrets you created. GitOps
+deployments should always set both, so a reconcile never renders a new
+cluster secret.
+</Aside>
+
+Rate-limit `/api/tenants/{tenant}/oauth/token` at the Gateway or Ingress; the
+chart renders no rate limit. See [Helm values](/reference/helm/#token-endpoint-rate-limit).
+
+## First admin token
+
+The pods hold the signing key, so `cyoda token` run inside a pod signs the
+first admin token. The binary in the image is `/cyoda`:
+
+```bash
+TOKEN=$(kubectl exec -n cyoda cyoda-0 -- /cyoda token --tenant acme)
+```
+
+Use it to create the M2M clients that applications and compute nodes use
+(`POST /api/clients`). For platform operations, such as cluster status, sign
+with `--tenant PLATFORM`. See [`cyoda help cli token`](/help/cli/token/) and
+[Authenticating applications](/build/authenticating-applications/).
+
+## Health, readiness and shutdown
+
+The StatefulSet probes the admin port: liveness on `/livez`, readiness on
+`/readyz` every 5 seconds. `/readyz` fails from the start of shutdown, so a
+terminating pod leaves the Service at once, and after a recovered panic, which
+takes the pod out of the Service within about 15 seconds. `/livez` keeps
+passing in that case, so Kubernetes does not restart the pod into the same
+panic: delete the pod to replace it. Peers route to it through gossip, not
+the Service, so it keeps receiving forwarded work until you do.
+
+The gRPC listener also serves the standard `grpc.health.v1.Health/Check`
+without a token, for a `grpc` probe or a gRPC-aware load balancer.
+
+A pod can take more than six minutes to shut down in the worst case, while
+the scheduler lets a non-idempotent processor callout finish. The chart's
+`terminationGracePeriodSeconds: 390` covers the default settings; raise it
+with the settings it depends on. See [Cluster operations](/run/cluster-operations/#shutdown).
+
+To check the cluster after an install, scale or upgrade:
+
+```bash
+TOKEN=$(kubectl exec -n cyoda cyoda-0 -- /cyoda token --tenant PLATFORM)
+kubectl -n cyoda port-forward svc/cyoda 8080:http &
+curl -s -H @- 'http://localhost:8080/api/platform/cluster?waitForNodes=3' \
+  <<<"Authorization: Bearer $TOKEN"
+```
+
+A `200` means three pods are `UP` and `NORMAL` on one version. See
+[Cluster status](/run/cluster-operations/#cluster-status).
+
+## Upgrades
+
+`helm upgrade` runs the migration Job, then rolls the StatefulSet one pod at a
+time (`updateStrategy: RollingUpdate`). **That is safe only when the target
+release's notes allow a rolling upgrade.** The upgrade from v0.8.4 to v0.9.0
+is not rolling (see the [v0.9.0 release notes](/releases/v0-9-0/)). When the
+notes do not allow it, scale to zero first:
+
+```bash
+# 1. Stop every pod and wait until none are left (kubectl reports
+#    "no matching resources" if they are already gone).
+kubectl -n cyoda scale statefulset cyoda --replicas=0
+kubectl -n cyoda wait --for=delete pod -l 'app.kubernetes.io/instance=cyoda,statefulset.kubernetes.io/pod-name' --timeout=420s
+
+# 2. Upgrade: the migration Job runs first, then the pods start on the new version.
+helm repo update
+helm upgrade cyoda cyoda/cyoda --namespace cyoda --reset-then-reuse-values --version 0.9.0
+
+# 3. Wait for the pods, then check cluster status (above).
+kubectl -n cyoda rollout status statefulset cyoda
+```
+
+`helm upgrade` sets the StatefulSet back to `replicas`. With
+`autoscaling.enabled=true`, the chart leaves the replica count to the
+HorizontalPodAutoscaler, which does not scale a workload up from zero: scale
+it back with `kubectl scale` after the upgrade.
+
+`--reset-then-reuse-values` keeps the values you set and takes the new chart's
+defaults for the rest; `--reuse-values` would carry the old chart's full value
+set and miss values the new chart adds.
+
+**Migrations.** The migration Job runs `cyoda migrate` with its default
+5-minute timeout, inside `migrate.activeDeadlineSeconds` (default `600`). Some
+migrations block writers for a time that grows with the size of your tables
+(see [Storage engines](/run/storage-engines/#migrations-and-maintenance-windows)).
+On a large database, either raise `migrate.activeDeadlineSeconds`, or run
+`cyoda migrate --timeout <duration>` with the new image against the database
+while the cluster is at zero, before `helm upgrade`; the Job then has nothing
+left to do. A Job killed in the middle of a migration leaves the schema marked
+dirty, which needs manual recovery (see [`cyoda help cli migrate`](/help/cli/migrate/)).
+If the Job fails, Helm does not move on to the new pods; read its log with
+`kubectl logs -n cyoda job/cyoda-migrate-<revision>`.
+
+Read the release notes before every upgrade, and run the [Cluster
+operations](/run/cluster-operations/#upgrades) checklist.
 
 ## Backup and restore
 
-Backup is standard PostgreSQL tooling: `pg_dump`, continuous WAL archiving,
-snapshot-based backups from your cloud provider. cyoda-go does not maintain
-any state outside PostgreSQL, so a PostgreSQL restore brings the platform
-back to that point in time in full.
-
-## Upgrades and rollback
-
-cyoda-go releases follow semantic versioning. For production:
-
-- **Blue/green or canary.** Run the new version alongside the old, cut
-  traffic over, retire the old.
-- **Rolling upgrade.** Fine for minor releases; set `maxUnavailable: 0` so
-  capacity never drops.
-- **Schema migration ordering.** Check the release notes for whether a
-  release requires a PostgreSQL schema migration step before the new binary
-  starts serving. The Helm chart runs schema migrations as a
-  pre-install/pre-upgrade hook; pod startup is blocked until migrations
-  complete.
+Back up PostgreSQL with standard tooling: `pg_dump`, continuous WAL archiving,
+or your provider's snapshots. The pods hold no data. Back up the Secrets too:
+the JWT signing key (`jwt.existingSecret`), and the HMAC Secret if you manage
+it yourself. The signing key signs every token cyoda-go issues and is the root
+key for the issued key pairs; a replaced signing key retires them and every
+token cyoda-go signed. The HMAC secret can be regenerated, with a full stop of
+the cluster.
 
 ## Sizing
 
-Sizing is driven by write volume more than read volume, because reads scale
-horizontally across pods while writes are serialised through PostgreSQL.
-Qualitative guide:
+Reads scale across pods; writes go through the single PostgreSQL primary,
+which bounds write throughput. The usual range is three pods for high
+availability up to about ten, where the PostgreSQL connection budget becomes
+the limit: each pod opens up to 44 connections at the default pool sizes
+(25 main, 10 scheduler, 1 heartbeat, 8 model). Size `max_connections` for the
+largest replica count you allow, including an autoscaler's `maxReplicas`. See
+[Cluster operations](/run/cluster-operations/#postgresql-connection-budget).
 
-- **Small.** 3 pods, `db.small` (or equivalent), up to a few hundred
-  transitions per second.
-- **Medium.** 5–7 pods, dedicated PostgreSQL, low thousands of
-  transitions per second.
-- **Large.** 10 pods with PostgreSQL scaled up; at this point consider
-  swapping to the commercial Cassandra storage engine (still on
-  Kubernetes), or handing operations to Cyoda Cloud as a SaaS.
+The default pod resources are a request of `100m` CPU and `256Mi` memory and a
+limit of `1000m` and `512Mi`. Measure your workload and set `resources`
+accordingly.
+
+For write volumes beyond a single PostgreSQL primary, commercial storage
+backends are available; contact Cyoda.
 
 ## Observability
 
-The chart exposes a Prometheus scrape annotation on the pods and surfaces
-the admin endpoints for log-level and tracing control. Standard
-OpenTelemetry configuration applies; wire OTLP exporters via environment
-variables in the Helm values.
+- **Metrics.** `/metrics` on port 9091 requires a bearer token: the chart sets
+  `CYODA_METRICS_REQUIRE_AUTH=true` and generates the bearer Secret unless you
+  name one. With `monitoring.serviceMonitor.enabled=true`, the chart renders a
+  Prometheus Operator `ServiceMonitor` that reads the bearer from that Secret.
+  The NetworkPolicy admits port 9091 only from the namespaces in
+  `networkPolicy.metricsFromNamespaces` (default: `monitoring`).
+- **Tracing.** Set the OpenTelemetry variables through `extraEnv`, for
+  example `CYODA_OTEL_ENABLED` and `OTEL_EXPORTER_OTLP_ENDPOINT`. Pass
+  `true`, `false` and numbers with `--set-string`: the chart's schema accepts
+  only strings in `extraEnv[].value`.
+- **Log level and sampling** can be changed at runtime per pod through
+  `/api/admin/log-level` and `/api/admin/trace-sampler`, with a platform
+  operator token. See [`cyoda help admin`](/help/admin/).
 
-## Scaling past PostgreSQL
-
-At the upper end of the sizing guide, PostgreSQL's write throughput
-becomes the bottleneck. Two paths past it — the application contract
-is identical in both:
-
-- **Swap to the commercial Cassandra storage engine, still on
-  Kubernetes.** The licensable plugin replaces the PostgreSQL backend
-  with a horizontally-scaling Cassandra-backed tier. The Helm chart,
-  the pod topology, and the application code are unchanged — only the
-  storage plugin configuration changes.
-- **Hand operations to Cyoda Cloud** (coming soon) — the managed
-  service that runs the stack for you, from shared Postgres up to the
-  Cassandra-backed enterprise tier. Same application contract,
-  different operational model.
-
-See [Cyoda Cloud](/cyoda-cloud/) for the managed option; contact sales
-for the commercial Cassandra plugin.
+See [`cyoda help telemetry`](/help/telemetry/) for the instruments.

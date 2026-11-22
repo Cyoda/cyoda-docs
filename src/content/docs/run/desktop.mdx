@@ -5,6 +5,7 @@ sidebar:
   order: 10
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="config database" />
@@ -20,55 +21,103 @@ The desktop binary supports two storage modes:
 
 - **In-memory** — everything lives in process memory. Sub-millisecond
   latencies. Data is lost on restart. Use it for tests, demos, and
-  digital-twin scenario runs.
-- **SQLite (default after `cyoda init`)** — durable, single-file, zero-ops. Data survives
-  restarts; backup is a file copy. Use it for everyday persistent work.
-  SQLite is single-writer; all writes serialize through the database file,
-  which limits concurrent write throughput.
+  digital-twin scenario runs. This is what the binary runs on until it is
+  given a configuration.
+- **SQLite** — durable, single-file, zero-ops. Data survives restarts;
+  backup is a file copy. Use it for everyday persistent work. SQLite is
+  single-writer; all writes serialize through the database file, which
+  limits concurrent write throughput.
 
-The SQLite database file is created at `~/.local/share/cyoda/cyoda.db` by
-`cyoda init`. Back it up by copying the file; migrate it by moving the file.
+SQLite is selected by a config file, not by default:
+
+- `cyoda init` writes a user config (`~/.config/cyoda/cyoda.env`, or
+  `%AppData%\cyoda\cyoda.env` on Windows) with `CYODA_STORAGE_BACKEND=sqlite`.
+  The install script runs it for you; after Homebrew, a Windows archive or
+  `go install`, run it yourself.
+- The `.deb` and `.rpm` packages ship a system config,
+  `/etc/cyoda/cyoda.env`, that selects SQLite. `cyoda init` then does nothing
+  unless you pass `--force`.
+
+The database file defaults to `~/.local/share/cyoda/cyoda.db` on Linux and
+macOS and `%LocalAppData%\cyoda\cyoda.db` on Windows; `CYODA_SQLITE_PATH`
+overrides it. Back it up by copying the file while the server is stopped:
+the database runs in WAL mode, so a copy of the main file taken while the
+server runs can miss recent writes. Migrate it by moving the file.
 
 ## Install
 
-Pick the installer that suits your platform; the authoritative list lives in
-the [cyoda-go README](https://github.com/Cyoda/cyoda-go#install).
+See [Install](/run/install/) for every route — Homebrew, the signed install
+script, `.deb` and `.rpm` packages, Windows and `go install` — and how to
+verify each. On macOS or Linux with Homebrew:
 
 ```bash
-# macOS / Linux via Homebrew
 brew install cyoda/cyoda-go/cyoda
+cyoda init
 ```
 
-Debian, RHEL, and `curl | sh` installers are available in the same
-document.
-
 ## Run
-
-The Homebrew and packaged installers run `cyoda init` for you, which sets
-up the SQLite store. To start the server:
 
 ```bash
 cyoda
 ```
 
-The binary exposes REST on port **8080** and gRPC on **9090** by default.
-The full CLI reference lives at [Reference → CLI](/reference/cli/).
+`cyoda serve` is the same command. It takes no flags: any argument other than
+`-h` / `--help` is refused with exit code `2` before anything starts. The full
+CLI reference lives at [Reference → CLI](/reference/cli/).
+
+The server opens three listeners, all bound to `127.0.0.1` by default:
+
+| Listener | Port | Bind address variable | Serves |
+|---|---|---|---|
+| REST API | `8080` (`CYODA_HTTP_PORT`) | `CYODA_HTTP_BIND_ADDRESS` | Every API endpoint under `/api` |
+| gRPC | `9090` (`CYODA_GRPC_PORT`) | `CYODA_GRPC_BIND_ADDRESS` | Compute nodes, gRPC entity API |
+| Admin | `9091` (`CYODA_ADMIN_PORT`) | `CYODA_ADMIN_BIND_ADDRESS` | `/livez`, `/readyz`, `/metrics` |
+
+On loopback, only processes on the same host reach the server. To serve
+clients or compute nodes on other hosts, set the bind addresses to `0.0.0.0`
+(or `::`) — and switch to JWT mode first.
+
+<Aside type="caution" title="Mock auth is the default">
+The default IAM mode is `mock`: every caller acts as one admin principal with
+data access. The server logs a WARN when a mock-mode HTTP or gRPC listener is
+bound to an address other than loopback. Before you bind to a network, set
+`CYODA_IAM_MODE=jwt` and a signing key; see
+[Authenticating applications](/build/authenticating-applications/).
+</Aside>
+
+`cyoda health` checks readiness from the same host: it calls `/readyz` on the
+admin port and exits `0` when the node is ready, `1` otherwise. Use it in a
+process supervisor's health check. No systemd units ship with cyoda-go;
+supervising the process is up to you.
+
+`Ctrl+C` (or `SIGTERM`) shuts the server down gracefully: running scheduled
+work drains first, then in-flight requests. A second signal during the drain
+forces an immediate exit with code `2`. For the drain timings, see
+[Cluster operations](/run/cluster-operations/).
 
 ## Configure
 
-cyoda-go reads configuration from environment variables, a config file, or
-CLI flags. The full list of options lives at
-[Reference → Configuration](/reference/configuration/); for everyday use
-the defaults are fine, and you only set a handful of variables
-(`CYODA_STORAGE_BACKEND`, listen ports, JWT keys) to adapt to your environment.
+cyoda-go reads configuration from `CYODA_*` environment variables and from
+env files: the system config, the user config written by `cyoda init`,
+`./.env`, and the profile files `CYODA_PROFILES` selects. There are no
+configuration flags. The full list of options and the precedence rules live
+at [Reference → Configuration](/reference/configuration/); for everyday use
+the defaults are fine, and you set only a handful of variables
+(`CYODA_STORAGE_BACKEND`, ports and bind addresses, the JWT signing key).
 
-For secrets, cyoda-go supports `*_FILE` suffixes on any credential
-environment variable so you can mount them from a secrets store rather than
-pass them on the command line.
+For secrets, the credential variables (`CYODA_JWT_SIGNING_KEY`,
+`CYODA_HMAC_SECRET`, `CYODA_POSTGRES_URL`, `CYODA_METRICS_BEARER`) each take a
+`*_FILE` companion that reads the value from a file, so the secret stays off
+the command line and out of the process environment.
+
+In JWT mode, the first admin token comes from the binary itself:
+`cyoda token --tenant <tenant>`, run in the same environment as the server, signs
+it with the server's signing key. See
+[`cyoda help cli token`](/help/cli/token/).
 
 ## Upgrading
 
-Upgrading is a version bump: install the new binary, restart the process.
-cyoda-go follows semantic versioning; configuration migration policy is
-documented in the
-[cyoda-go release notes](https://github.com/Cyoda/cyoda-go/releases).
+Read the [release notes](/releases/v0-9-0/) for the target release, then
+install the newer release by the route you used before and restart the
+process. The SQLite schema migrates when the new binary starts. See
+[Install → Upgrade](/run/install/#upgrade).

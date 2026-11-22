@@ -1,10 +1,11 @@
 ---
 title: "Helm values"
-description: "cyoda-go Helm chart — narrative navigator over `cyoda help helm`."
+description: "cyoda-go Helm chart — values model, required values, secrets, migrations and upgrades; a navigator over `cyoda help helm`."
 sidebar:
   order: 50
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 import helpIndex from '../../../data/cyoda-help-index.json';
 
@@ -18,46 +19,184 @@ export const helmTopics = (() => {
 
 <FromTheBinary topic="helm" />
 
-The `deploy/helm/cyoda` chart packages cyoda-go for Kubernetes. The
-chart's own `values.yaml` enumerates every configurable key; this page
-covers the model that shapes how those values map to Kubernetes objects
-and how secrets are provisioned.
+The cyoda-go Helm chart is published to the Helm repository
+`https://cyoda.github.io/cyoda-go` as `cyoda/cyoda`; its source is
+[`deploy/helm/cyoda`](https://github.com/Cyoda/cyoda-go/tree/main/deploy/helm/cyoda).
+It requires Kubernetes 1.31 or later. A chart release normally carries the
+version of the cyoda-go release it runs, and its app version is the image tag
+used unless you set `image.tag`.
 
-## What the chart provisions
-
-A standard deployment per release: a `Deployment`, a `Service` for HTTP
-+ gRPC + admin ports, a `ConfigMap` materialising the `.env`-format
-configuration, and a `Secret` for credential material. An optional
-`ServiceMonitor` (Prometheus Operator) and `HorizontalPodAutoscaler`
-are wired off per-value flags.
+`cyoda help helm` lists every value with its type, default and purpose, and
+the chart's `values.yaml` and `values.schema.json` are the runtime source of
+truth. This page covers the model behind them. For the deployment shape and
+the objects the chart renders, see [Run → Kubernetes](/run/kubernetes/).
 
 ## Values model
 
-Values split into two groups:
+The chart fixes most of the server's configuration itself and exposes few
+server settings as values.
 
-- **Configuration values** — map one-to-one to the `CYODA_*` env vars
-  documented in the binary. Changing them alters runtime behaviour but
-  not Kubernetes shape. See `cyoda help config` for the list.
-- **Deployment values** — image tag, replica count, resource requests,
-  service type, ingress glue. These shape the Kubernetes objects the
-  chart renders; they never reach the binary.
+**Values that reach the server:**
+
+| Value | Default | Server variable |
+|---|---|---|
+| `logLevel` | `info` | `CYODA_LOG_LEVEL` (`debug`, `info`, `warn`, `error`) |
+| `jwt.issuer` | `cyoda` | `CYODA_JWT_ISSUER`; must not be empty |
+| `jwt.expirySeconds` | `300` | `CYODA_JWT_EXPIRY_SECONDS`; 1 to 3600 |
+| `terminationGracePeriodSeconds` | `390` | Not a server variable: the pod's grace period, which must cover the node's worst-case shutdown |
+
+**Everything else shapes Kubernetes objects**: image, replicas, resources,
+Service type, Gateway or Ingress routes, NetworkPolicy, PodDisruptionBudget,
+autoscaling, monitoring, the migration Job and the Secret references.
+
+**Set by the chart, not by you.** The ConfigMap sets the ports, all three bind
+addresses (`0.0.0.0`), `CYODA_IAM_MODE=jwt` with `CYODA_REQUIRE_JWT=true`,
+`CYODA_STORAGE_BACKEND=postgres`, `CYODA_POSTGRES_AUTO_MIGRATE=false` (the
+migration Job migrates), `CYODA_CLUSTER_ENABLED=true`, the seed list and
+`CYODA_METRICS_REQUIRE_AUTH=true`. The StatefulSet sets `CYODA_NODE_ID` from
+the pod name, `CYODA_NODE_ADDR`, `CYODA_GOSSIP_ADDR` and the four credential
+`_FILE` variables. Do not set any of these in `extraEnv`.
+
+**Any other server setting goes in `extraEnv`**, a list of `{name, value}` or
+`{name, valueFrom}` entries added to the container's environment: OpenTelemetry,
+IAM feature flags, pool sizes, timeouts.
+
+```bash
+helm upgrade cyoda cyoda/cyoda --namespace cyoda --reset-then-reuse-values \
+  --set "extraEnv[0].name=CYODA_OTEL_ENABLED" \
+  --set-string "extraEnv[0].value=true" \
+  --set "extraEnv[1].name=OTEL_EXPORTER_OTLP_ENDPOINT" \
+  --set "extraEnv[1].value=http://otel-collector.monitoring.svc.cluster.local:4318"
+```
+
+Two rules apply. A value must be a string, so pass `true`, `false` and numbers
+with `--set-string`, or quote them in a values file. And Helm does not merge
+lists: an `extraEnv` given with `--set` replaces the release's whole list, so
+list every entry you keep.
+
+The chart ignores values it does not declare. A leftover `bootstrap.*` block
+from an older values file has no effect; the first admin token comes from
+`cyoda token` (see [Kubernetes](/run/kubernetes/#first-admin-token)).
+
+## Required values
+
+| Value | Requirement |
+|---|---|
+| `postgres.existingSecret` | Name of a Secret holding the PostgreSQL DSN (key `postgres.existingSecretKey`, default `dsn`). Must exist before install. |
+| `jwt.existingSecret` | Name of a Secret holding the PEM RSA signing key (key `jwt.existingSecretKey`, default `signing-key.pem`). |
+| `gateway.parentRefs` | With `gateway.enabled=true`, the default: a non-empty list of Gateways to attach the routes to, each with a `name`. The chart does not render the Gateway. |
+
+The schema refuses an empty, null or missing `gateway.parentRefs` while
+`gateway.enabled` is `true`, so the install fails. On a cluster without
+Gateway API, set `gateway.enabled=false` and use `ingress.enabled=true` or the
+Service directly. Gateway and Ingress are mutually exclusive.
 
 ## Secret provisioning
 
-Credentials follow the same `_FILE` pattern as bare-metal deployments.
-The chart mounts the `Secret` at a known path and sets `CYODA_*_FILE`
-env vars accordingly, so the binary reads each secret at startup. You
-never put raw credentials into the chart's `values.yaml` in a
-production deployment — wire an existing `Secret` via `existingSecret`
-or equivalent.
+Credentials never go into the ConfigMap. The chart mounts a projected Secret
+volume at `/etc/cyoda/secrets` (mode `0400`) and points the server at each
+file:
+
+| Server variable | File | Source |
+|---|---|---|
+| `CYODA_POSTGRES_URL_FILE` | `postgres-dsn` | `postgres.existingSecret` |
+| `CYODA_JWT_SIGNING_KEY_FILE` | `jwt-signing-key.pem` | `jwt.existingSecret` |
+| `CYODA_HMAC_SECRET_FILE` | `hmac-secret` | `cluster.hmacSecret.existingSecret`, or a Secret the chart generates |
+| `CYODA_METRICS_BEARER_FILE` | `metrics-bearer` | `monitoring.metricsBearer.existingSecret`, or a Secret the chart generates |
+
+The HMAC secret is 32 random bytes written as 64 hex characters; a pod does not
+start with a shorter one. To change a credential, change the Secret the value
+names; do not add a `_FILE` or plain credential variable to `extraEnv`.
+
+<Aside type="caution" title="Generated Secrets and GitOps">
+When `cluster.hmacSecret.existingSecret` or
+`monitoring.metricsBearer.existingSecret` is empty, the chart generates that
+Secret on first install and reuses it on later renders, using `lookup`.
+Without live cluster access (`helm template`, `--dry-run`, Argo CD,
+`--create-namespace` on a first install) `lookup` returns nothing and the chart
+fails with an explicit error. For GitOps, pre-create both Secrets and name
+them. Rotating the HMAC secret needs a full stop of the cluster; see
+[Cluster operations](/run/cluster-operations/#rotating-the-cluster-secret).
+</Aside>
 
 ## Database migrations
 
-Schema migrations can run under a **separate Postgres connection** from
-the runtime. Set an optional migration DSN (`migrate.postgres`) when the
-account that applies DDL should differ from the least-privilege account
-the running pods use — a common production split. When it is unset,
-migrations run over the runtime connection.
+The pods do not migrate. A `Job` running `cyoda migrate` is a pre-install and
+pre-upgrade hook, so it runs before the StatefulSet changes. It mounts only the
+DSN Secret.
+
+| Value | Default | Purpose |
+|---|---|---|
+| `migrate.postgres.existingSecret` | `""` | A separate DSN for the Job, for a database role that may run DDL while the pods use a least-privilege role. Empty: the Job uses `postgres.existingSecret`. |
+| `migrate.postgres.existingSecretKey` | `dsn` | Key of that Secret. |
+| `migrate.activeDeadlineSeconds` | `600` | Kubernetes deadline for the Job. |
+| `migrate.backoffLimit` | `2` | Retries of the Job. |
+
+`cyoda migrate` stops after 5 minutes by default. Migrations that block
+writers take time in proportion to your tables; on a large database, run
+`cyoda migrate --timeout <duration>` yourself before the upgrade. See
+[Storage engines](/run/storage-engines/#migrations-and-maintenance-windows).
+
+## Shutdown grace period
+
+`terminationGracePeriodSeconds` defaults to `390`. It must cover the node's
+worst-case shutdown, `max(CYODA_SCHEDULER_SHUTDOWN_DRAIN + 10, callout
+deadline) + 100` seconds, which is 375 seconds at the server defaults. Raise it
+when you raise `CYODA_SCHEDULER_SHUTDOWN_DRAIN`,
+`CYODA_RETRY_FIXED_NUM_RETRIES`, `CYODA_CALLOUT_RESPONSE_TIMEOUT_MAX_MS`,
+`CYODA_DISPATCH_WAIT_TIMEOUT` or `CYODA_CALLOUT_HANDOVER_ALLOWANCE` through
+`extraEnv`. See [Cluster operations](/run/cluster-operations/#shutdown).
+
+## Token endpoint rate limit
+
+The token endpoint, `POST /api/tenants/{tenant}/oauth/token`, checks client
+secrets with bcrypt. Each node bounds that work and answers `503` past the
+bound, so a flood of bad credentials can keep legitimate clients getting
+`503`. The chart renders no rate limit: configure a per-source limit for paths
+matching `^/api/tenants/[^/]+/oauth/token$` on your Gateway, or with Ingress
+annotations for your controller.
+
+## Monitoring
+
+`/metrics` on port 9091 always requires a bearer token on a Helm deployment.
+With `monitoring.serviceMonitor.enabled=true` the chart renders a
+`ServiceMonitor` that reads the bearer from the metrics Secret, with
+`monitoring.serviceMonitor.interval` (default `30s`) and
+`monitoring.serviceMonitor.labels` for your Prometheus Operator's selector.
+With `networkPolicy.enabled=true` (the default), port 9091 accepts traffic
+only from the namespaces in `networkPolicy.metricsFromNamespaces` (default:
+the `monitoring` namespace). The NetworkPolicy needs a CNI that enforces it;
+on one that does not, such as kindnet, set `networkPolicy.enabled=false`.
+
+## Install, upgrade, uninstall
+
+```bash
+helm repo add cyoda https://cyoda.github.io/cyoda-go
+helm repo update
+helm search repo cyoda/cyoda --versions
+
+helm install cyoda cyoda/cyoda --namespace cyoda \
+  --set postgres.existingSecret=cyoda-pg \
+  --set jwt.existingSecret=cyoda-jwt \
+  --set "gateway.parentRefs[0].name=prod-gateway"
+
+helm upgrade cyoda cyoda/cyoda --namespace cyoda --reset-then-reuse-values
+
+helm test cyoda --namespace cyoda
+```
+
+- **Upgrade.** `--reset-then-reuse-values` keeps the values you set and takes
+  the new chart's defaults for the rest; `--reuse-values` would miss values a
+  newer chart adds. Without `--version`, Helm takes the newest chart.
+  `helm upgrade` rolls the pods one at a time, which is safe only when the
+  release notes allow a rolling upgrade; otherwise scale to zero first, as
+  shown in [Kubernetes → Upgrades](/run/kubernetes/#upgrades).
+- **Smoke test.** `helm test` runs the chart's test pod, which checks
+  `/readyz`.
+- **Uninstall.** `helm uninstall` deletes the release's objects, including the
+  Secrets the chart generated. It leaves the `cyoda-env` ConfigMap and the
+  ServiceAccount (created as install hooks), the Secrets you created, the
+  namespace and the database.
 
 ## Related topics
 
@@ -71,5 +210,6 @@ migrations run over the runtime connection.
   ))}
 </ul>
 
-See [Run → Kubernetes](/run/kubernetes/) for the deployment pattern and
-production-sizing guidance.
+See [Run → Kubernetes](/run/kubernetes/) for the deployment pattern, and
+[Cluster operations](/run/cluster-operations/) for what applies to every
+cluster.

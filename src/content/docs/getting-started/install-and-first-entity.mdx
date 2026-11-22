@@ -1,6 +1,6 @@
 ---
 title: "Install cyoda-go and create your first entity"
-description: "Install cyoda-go with SQLite (the default), define an entity model, trigger a workflow, and read state back."
+description: "Install cyoda-go, start it on SQLite, register a model and a workflow, create an entity, fire a transition and read its history."
 sidebar:
   order: 0
 ---
@@ -9,46 +9,50 @@ import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 This page takes you from nothing installed to a persisted entity you can query,
-running entirely on your own machine. The default backend is **SQLite** — zero
-operational overhead, one file on disk, data survives restarts.
+running entirely on your own machine. The local default backend is
+**SQLite**: one file on disk, no database server, and data survives restarts.
 
 ## Install Cyoda
 
-cyoda-go ships as a single binary. Pick the flavour that fits your machine; the
-authoritative list of installers lives in the
-[cyoda-go README](https://github.com/Cyoda/cyoda-go#install).
+cyoda-go ships as a single binary. On macOS or Linux with Homebrew:
 
 ```bash
-# macOS / Linux via Homebrew
 brew install cyoda/cyoda-go/cyoda
+cyoda init
 ```
 
-The Homebrew formula is expected to run `cyoda init` automatically, enabling
-SQLite persistence with data at `~/.local/share/cyoda/cyoda.db` on macOS/Linux.
-If it didn't (or if you installed another way), run `cyoda init` yourself — see
-`cyoda help cli init` for what it does. A `curl | sh` installer, Debian
-packages, and Fedora RPMs are available for other environments.
+`cyoda init` writes a user config (`~/.config/cyoda/cyoda.env`) that selects
+SQLite, with the database at `~/.local/share/cyoda/cyoda.db`. Without that
+config the binary runs on the in-memory backend and keeps nothing across
+restarts. The install script runs `cyoda init` for you, and the `.deb` and
+`.rpm` packages ship a system config that selects SQLite; Homebrew does
+neither, so run it yourself.
 
-<FromTheBinary topic="cli init" />
+The other routes — the signed install script, Debian and Fedora packages, the
+container image, Windows and `go install` — and how to verify and upgrade each
+are on [Install](/run/install/).
+
+<FromTheBinary topic="install" />
 
 ## Install Cyoda coding agent skills
 
-Building with Cyoda is easiest with an AI coding assistant. The <a href="https://github.com/Cyoda/cyoda-skills" target="_blank" rel="noopener noreferrer">Cyoda Skills plugin</a> drops in
-to Claude Code, Cursor, Codex, and other compatible tools, giving them
-the skills to set up a local instance, model entities, design
-workflows, and run tests against your Cyoda app. Install it from
-<a href="https://github.com/Cyoda/cyoda-skills" target="_blank" rel="noopener noreferrer">github.com/Cyoda/cyoda-skills</a>
-and let your assistant lead — the rest of this page walks through the
+Building with Cyoda is easiest with an AI coding assistant. The
+<a href="https://github.com/Cyoda/cyoda-skills" target="_blank" rel="noopener noreferrer">Cyoda Skills plugin</a>
+gives the assistant skills to set up a local instance, design and register
+entities and workflows, write compute nodes, and test and debug your Cyoda
+app. Claude Code is the best-supported host (install from its plugin
+marketplace); other agents can read the skill files from the repository. See
+[Cyoda Skills](/tools/cyoda-skills/). The rest of this page walks through the
 same steps by hand.
 
-## Why SQLite is the default
+## Why SQLite
 
 SQLite is durable (data survives restarts), zero-ops (no server to run), and
 single-file (easy to inspect, back up, or delete). It is the right starting
 point for everyone except two groups: teams running functional tests where
-latency matters more than durability (use **in-memory** mode — see the callout
-below), and teams building production services (graduate to **PostgreSQL** when
-you need active-active HA; see [Run → overview](/run/)).
+latency matters more than durability (use **in-memory** mode — see the tip
+at the end of this page), and teams building production services (graduate to
+**PostgreSQL** when you need more than one node; see [Run → overview](/run/)).
 
 ## Start the server
 
@@ -58,23 +62,46 @@ Start the server with the defaults:
 cyoda
 ```
 
-<Aside type="note" title="No token? That's expected locally.">
-Running `cyoda` (no subcommand) defaults to **mock auth** (`CYODA_IAM_MODE=mock`): every
-request is authenticated as a configurable default user, no bearer token
-required. You'll see examples elsewhere in the docs with
-`-H "Authorization: Bearer $TOKEN"`; those are written for production
-deployments running in JWT mode. On a fresh local install you can drop
-the header — or keep it and send any placeholder; mock mode ignores it.
+`cyoda serve` is the same command. It takes no flags; every setting is a
+`CYODA_*` environment variable or an entry in an env file (see
+[Configuration](/reference/configuration/)). The server opens three listeners,
+all on `127.0.0.1` by default, so only processes on the same host reach them:
 
-Flip to JWT mode by setting `CYODA_IAM_MODE=jwt` plus
-`CYODA_JWT_SIGNING_KEY` (RSA private key, PEM). For the full auth-mode
-configuration see [Configuration](/reference/configuration/).
+- REST API on port **8080**, under the context path `/api`;
+- gRPC on port **9090**, for compute nodes;
+- admin on port **9091**: the `/livez` and `/readyz` probes and `/metrics`.
+
+Check that it is ready:
+
+```bash
+curl http://localhost:9091/readyz
+```
+
+```text
+ready
+```
+
+<Aside type="note" title="No token? That's expected locally.">
+The default IAM mode is **mock** (`CYODA_IAM_MODE=mock`). Every request, with or
+without a token, runs as one fixed principal: user `mock-user-001` in tenant
+`mock-tenant`, kind `service`, roles `ROLE_ADMIN,ROLE_M2M`. The examples below
+send no `Authorization` header. Examples elsewhere in the docs that send
+`-H "Authorization: Bearer $TOKEN"` are written for JWT mode; mock mode ignores
+the header.
+
+Mock mode accepts every caller, which is why the listeners stay on loopback.
+Do not expose a mock-mode instance to a network.
+
+For JWT mode, set `CYODA_IAM_MODE=jwt` and give the server an RSA signing key
+in `CYODA_JWT_SIGNING_KEY_FILE`. The first admin token is signed with the same
+key by `cyoda token --tenant <tenant>`; applications then connect as M2M clients.
+See [Authenticating applications](/build/authenticating-applications/).
 </Aside>
 
 ## Discover everything else with `cyoda help`
 
-Every flag, environment variable, endpoint, error code, metric, and operation
-is documented in the binary. Browse the topic tree:
+Every environment variable, endpoint, error code, metric, and operation is
+documented in the binary. Browse the topic tree:
 
 ```bash
 cyoda help
@@ -90,21 +117,41 @@ cyoda help errors        # the error catalogue
 cyoda help telemetry     # metrics, health, tracing, logs
 ```
 
-`cyoda help <topic> --format=json` emits a machine-readable shape suitable
-for tools; `--format=markdown` is the default off a TTY.
+A subtopic is addressed by its segments or by its dotted id:
+`cyoda help config database` and `cyoda help config.database` are the same
+topic. `cyoda help <topic> --format=json` emits a machine-readable shape
+suitable for tools; `--format=markdown` is the default off a TTY.
+
+## Register a model
+
+An entity belongs to a model, identified by a name and a version. Register the
+`orders` model at version `1` from a sample document; cyoda-go derives the
+schema from the sample, so you do not declare it up front:
+
+```bash
+curl -X POST http://localhost:8080/api/model/import/JSON/SAMPLE_DATA/orders/1 \
+  -H 'Content-Type: application/json' \
+  -d '{ "orderId": "ORD-1", "amount": 42.00, "currency": "EUR" }'
+```
+
+The response is the model's id:
+
+```json
+"f3a02baa-f92f-5749-879d-61613b4aa4ba"
+```
 
 ## Import a workflow
 
-Before creating an entity, import a workflow so the platform knows which
-state machine to apply. Save this as `workflow.json` — two states
-(`draft` and `submitted`) with one manual transition. States are keyed by
-name; each state owns its outgoing transitions:
+Next, import a workflow so the platform knows which state machine to apply
+to `orders` entities. Save this as `workflow.json` — two states (`draft` and
+`submitted`) with one manual transition. States are keyed by name; each state
+owns its outgoing transitions:
 
 ```json
 {
   "workflows": [
     {
-      "version": "1",
+      "version": "1.5",
       "name": "orders-wf",
       "initialState": "draft",
       "active": true,
@@ -121,7 +168,7 @@ name; each state owns its outgoing transitions:
 }
 ```
 
-Post it to the import endpoint for the `orders` model at version `1`:
+Post it to the workflow import endpoint of the `orders` model, version `1`:
 
 ```bash
 curl -X POST http://localhost:8080/api/model/orders/1/workflow/import \
@@ -129,77 +176,184 @@ curl -X POST http://localhost:8080/api/model/orders/1/workflow/import \
   -d @workflow.json
 ```
 
-Without this step, cyoda-go applies its default workflow (`NONE` →
-`CREATED` → `DELETED` with a single automatic transition), and the
-`submit` transition used below will not exist.
+```json
+{"success":true}
+```
 
-For the full workflow schema — processors, criteria, automatic
-transitions, nested conditions — see
+The model must exist first: importing a workflow for a model that has not been
+registered answers `404 MODEL_NOT_FOUND`. Without a workflow, cyoda-go applies
+its default workflow (`NONE` → `CREATED` → `DELETED` with a single automatic
+transition), and the `submit` transition used below does not exist.
+
+For the full workflow schema — processors, criteria, automatic transitions,
+nested conditions — see
 [Build → workflows and processors](/build/workflows-and-processors/).
+
+## Lock the model
+
+Entities can be created only against a **locked** model; a create against an
+unlocked one answers `409 MODEL_NOT_LOCKED`. Lock it:
+
+```bash
+curl -X PUT http://localhost:8080/api/model/orders/1/lock
+```
+
+```json
+{"message":"Model orders:1 locked","modelId":"f3a02baa-f92f-5749-879d-61613b4aa4ba","modelKey":{"name":"orders","version":1},"success":true}
+```
+
+A locked model can still evolve in a controlled way; see
+[Modeling entities](/build/modeling-entities/).
 
 ## Create your first entity
 
-Define a minimal model and push an entity. Cyoda discovers the schema from the
-sample you send, so you do not need to declare it up front:
-
 ```bash
-ENTITY_ID=$(curl -s -X POST http://localhost:8080/api/entity/JSON/orders/1 \
+curl -X POST http://localhost:8080/api/entity/JSON/orders/1 \
   -H 'Content-Type: application/json' \
-  -d '{ "orderId": "ORD-1", "amount": 42.00, "currency": "EUR" }' \
-  | jq -r '.[0].entityIds[0]')
-echo "$ENTITY_ID"
+  -d '{ "orderId": "ORD-1", "amount": 42.00, "currency": "EUR" }'
+```
+
+```json
+[{"entityIds":["dbe4f360-e6c0-11f1-ae29-ae468cd3ed16"],"transactionId":"dbe4f342-e6c0-11f1-ae29-ae468cd3ed16"}]
 ```
 
 The create response is an array; `entityIds[0]` on the first element is the
-**system-assigned UUID** of the new entity. Subsequent reads and transitions
-address the entity by that UUID (`${ENTITY_ID}` here), not by the business
-key `orderId`.
+**system-assigned UUID** of the new entity. Reads and transitions address the
+entity by that UUID, not by the business key `orderId`. Keep it in a shell
+variable for the steps below:
+
+```bash
+ENTITY_ID=dbe4f360-e6c0-11f1-ae29-ae468cd3ed16   # your id from the response
+```
 
 Automatic transitions (`manual: false`) fire immediately on creation,
 cascading the entity through applicable states until it reaches one with
-no outgoing auto transitions. The `orders-wf` workflow you just imported
+no outgoing automatic transition. The `orders-wf` workflow you imported
 has none, so the entity settles in `draft` and waits for the manual
-`submit` transition below.
+`submit` transition.
 
 ## Invoke a manual transition
 
-Trigger the `submit` transition on your entity. `{entityId}` (here
-`${ENTITY_ID}`) is the system-assigned UUID captured from the create
-response, not the business key `orderId`:
+A transition is fired by an update that names it. The update needs the
+entity's current `meta.transactionId` from a read, so that it does not apply
+to a version you have not seen. Read it:
 
 ```bash
-curl -X PUT http://localhost:8080/api/entity/JSON/${ENTITY_ID}/submit
+TX_ID=$(curl -s http://localhost:8080/api/entity/$ENTITY_ID | jq -r '.meta.transactionId')
 ```
+
+Then fire `submit` with a JSON merge patch. The empty patch `{}` leaves the data
+as it is, and `If-Match` carries the transaction id you read:
+
+```bash
+curl -X PATCH http://localhost:8080/api/entity/JSON/$ENTITY_ID/submit \
+  -H 'Content-Type: application/merge-patch+json' \
+  -H "If-Match: $TX_ID" \
+  -d '{}'
+```
+
+```json
+{"entityIds":["dbe4f360-e6c0-11f1-ae29-ae468cd3ed16"],"transactionId":"e46fb2ea-e6c0-11f1-ae29-ae468cd3ed16"}
+```
+
+`PATCH` requires `If-Match`: without it the request answers
+`428 PRECONDITION_REQUIRED`, and if the entity changed since your read it
+answers `412 ENTITY_MODIFIED`. `If-Match: *` patches the current version
+whatever it is. The alternative is `PUT` on the same path with the entity's
+full data as the body; `PUT` refuses an empty body, and its `If-Match` is
+optional.
 
 ## Read state back
 
-Fetch the current state and the transition log:
+Fetch the entity:
 
 ```bash
-curl http://localhost:8080/api/entity/${ENTITY_ID}
+curl http://localhost:8080/api/entity/$ENTITY_ID
 ```
 
-The response shows the entity in its new `submitted` state plus a record of
-every revision it has been through. For the full request and response shapes,
-see the [API reference](/reference/api/).
+```json
+{
+  "data": {
+    "amount": 42.00,
+    "currency": "EUR",
+    "orderId": "ORD-1"
+  },
+  "meta": {
+    "creationDate": "2026-11-22T22:05:42.252101Z",
+    "id": "dbe4f360-e6c0-11f1-ae29-ae468cd3ed16",
+    "lastUpdateTime": "2026-11-22T22:05:56.583246Z",
+    "modelKey": {
+      "name": "orders",
+      "version": 1
+    },
+    "state": "submitted",
+    "transactionId": "e46fb2ea-e6c0-11f1-ae29-ae468cd3ed16",
+    "transitionForLatestSave": "submit"
+  },
+  "type": "ENTITY"
+}
+```
+
+The entity is in `submitted`, and `transitionForLatestSave` names the
+transition that produced this version. The history of changes is a separate
+read:
+
+```bash
+curl http://localhost:8080/api/entity/$ENTITY_ID/changes
+```
+
+```json
+[
+  {
+    "attributedKind": "service",
+    "changeType": "UPDATE",
+    "executedBy": {
+      "id": "mock-user-001",
+      "kind": "service"
+    },
+    "timeOfChange": "2026-11-22T22:05:56.583246Z",
+    "transactionId": "e46fb2ea-e6c0-11f1-ae29-ae468cd3ed16",
+    "user": "mock-user-001"
+  },
+  {
+    "attributedKind": "service",
+    "changeType": "CREATE",
+    "executedBy": {
+      "id": "mock-user-001",
+      "kind": "service"
+    },
+    "timeOfChange": "2026-11-22T22:05:42.252101Z",
+    "transactionId": "dbe4f342-e6c0-11f1-ae29-ae468cd3ed16",
+    "user": "mock-user-001"
+  }
+]
+```
+
+Each change records the transaction, the time, the principal it is attributed
+to and the principal that executed it — in mock mode both are the mock
+principal. For the full request and response shapes, see the
+[API reference](/reference/api/).
 
 ## Next steps
 
-- **Explore the binary.** Every flag, env var, endpoint, and error is
-  described by a `cyoda help <topic>` action. Browse the full tree at
+- **Explore the binary.** Every environment variable, endpoint, and error is
+  described by a `cyoda help` topic. Browse the full tree at
   [Help → topic tree (`cyoda help`)](/help/topic-tree/).
 - **Understand the model.** Read [Design principles](/concepts/design-principles/)
   and [Entities and lifecycle](/concepts/entities-and-lifecycle/) for the mental
   model behind what you just did.
 - **Build real applications.** Start with
   [Build → working with entities](/build/working-with-entities/) for the
-  end-to-end patterns.
-- **Choose a deployment tier.** See [Run → overview](/run/) when you outgrow
+  end-to-end patterns, and
+  [Authenticating applications](/build/authenticating-applications/) for
+  running in JWT mode.
+- **Choose how to run it.** See [Run → overview](/run/) when you outgrow
   local SQLite.
 
 <Aside type="tip" title="Testing without disk">
-If you want fast functional tests without durability, run cyoda-go in
-**in-memory** mode (`go run ./cmd/cyoda` or the `CYODA_STORAGE_BACKEND=memory` profile).
+For fast functional tests without durability, run cyoda-go on the
+**in-memory** backend: `CYODA_STORAGE_BACKEND=memory cyoda`. An environment
+variable overrides the SQLite setting that `cyoda init` wrote.
 See [Testing with digital twins](/build/testing-with-digital-twins/) for the
 pattern.
 </Aside>
