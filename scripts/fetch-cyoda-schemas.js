@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dirAtVersion, stampDir } from './lib/pinned-output.js';
 
 import { parsePinFile, ensureBinary, err } from './lib/cyoda-binary.js';
 
@@ -69,7 +70,7 @@ function parseCloudEventsPayload(stdout) {
  * @param {string}  opts.versionFilePath               — path to cyoda-go-version.json
  * @param {string}  opts.outputDir                     — where to write src/schemas/
  * @param {string}  opts.cacheDir                      — binary cache root
- * @param {boolean} [opts.ifMissing]                   — no-op if outputDir already has .json files
+ * @param {boolean} [opts.ifMissing]                   — no-op if outputDir is stamped with the pinned version
  * @param {{platform:string,arch:string}} [opts.platformHint]
  * @param {typeof spawnSync} [opts.spawnSync]          — injectable spawnSync
  */
@@ -82,20 +83,11 @@ export async function run({
   platformHint,
   spawnSync: spawnSyncFn = spawnSync,
 }) {
-  // --if-missing: skip if outputDir already has at least one .json file
-  if (ifMissing) {
-    try {
-      const existing = fs.readdirSync(outputDir, { recursive: true })
-        .filter((f) => typeof f === 'string' && f.endsWith('.json'));
-      if (existing.length > 0) {
-        return;
-      }
-    } catch {
-      // directory doesn't exist yet — fall through
-    }
-  }
-
   const version = parsePinFile(versionFilePath);
+  // --if-missing: skip only if outputDir was written for the pinned version
+  if (ifMissing && dirAtVersion(outputDir, version)) {
+    return;
+  }
   console.log(`🧬 Fetching cyoda CloudEvent schemas (pinned v${version})...`);
 
   const versionCacheDir = path.join(cacheDir, `v${version}`);
@@ -123,6 +115,8 @@ export async function run({
     fs.writeFileSync(destPath, content, 'utf8');
     totalBytes += Buffer.byteLength(content, 'utf8');
   }
+
+  stampDir(outputDir, version);
 
   const totalKB = Math.round(totalBytes / 1024);
   console.log(`  wrote ${outputDir} (${entries.length} schemas, ${totalKB} KB)`);

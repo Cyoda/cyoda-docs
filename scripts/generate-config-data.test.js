@@ -35,6 +35,19 @@ test('tolerates empty type and absent default (renders blank strings)', () => {
   assert.equal(out.vars[0].description, 'x');
 });
 
+test('keeps the binary\'s required flag; absent or non-true means optional', () => {
+  const out = normalizeConfig({
+    schema: 1,
+    version: 'dev',
+    vars: [
+      { name: 'CYODA_A', topic: 'database', description: 'a', required: true },
+      { name: 'CYODA_B', topic: 'database', description: 'b' },
+      { name: 'CYODA_C', topic: 'database', description: 'c', required: 'yes' },
+    ],
+  });
+  assert.deepEqual(out.vars.map((v) => v.required), [true, false, false]);
+});
+
 test('coerces non-string default to string', () => {
   const out = normalizeConfig({
     schema: 1,
@@ -150,3 +163,33 @@ test('run: a non-zero binary exit fails the build', async () => {
   fs.rmSync(tmpdir, { recursive: true });
   fs.rmSync(versionFile);
 });
+
+for (const [label, existingVersion, expectRefetch] of [
+  ['at the pinned version', 'test-pin', false],
+  ['from another pinned version', 'older-pin', true],
+]) {
+  test(`--if-missing: ${expectRefetch ? 'regenerates' : 'short-circuits'} when the data is ${label}`, async () => {
+    const versionFile = tmpVersionFile('test-pin');
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyoda-config-test-'));
+    const outputPath = path.join(tmpdir, 'cyoda-config-all.json');
+    fs.writeFileSync(outputPath, JSON.stringify({ schema: 1, version: existingVersion, vars: [] }));
+
+    let spawnCalled = false;
+    const stub = makeSpawnSync('test-pin');
+    await run({
+      fetch: async () => { throw new Error('fetch should not be called in fast-path'); },
+      spawnSync: (...a) => { spawnCalled = true; return stub(...a); },
+      versionFilePath: versionFile,
+      outputPath,
+      cacheDir: path.join(tmpdir, 'cache'),
+      ifMissing: true,
+      platformHint: { platform: 'darwin', arch: 'arm64' },
+    });
+
+    assert.equal(spawnCalled, expectRefetch);
+    assert.equal(JSON.parse(fs.readFileSync(outputPath, 'utf8')).version, expectRefetch ? 'test-pin' : existingVersion);
+
+    fs.rmSync(tmpdir, { recursive: true });
+    fs.rmSync(versionFile);
+  });
+}

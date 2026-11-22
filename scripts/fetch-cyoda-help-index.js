@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { jsonFilesAtVersion } from './lib/pinned-output.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -106,12 +107,14 @@ function stripAndSort(helpJson) {
  * @param {string} opts.outputPath
  * @param {string} [opts.fullOutputPath] - when set, also write the full validated payload (bodies preserved) to this path
  * @param {boolean} [opts.ifMissing] - when true, no-op if outputPath (and fullOutputPath, if set) exist
+ *   and were generated for the pinned version
  */
 export async function run({ fetch, versionFilePath, outputPath, fullOutputPath, ifMissing }) {
-  if (ifMissing && fs.existsSync(outputPath) && (!fullOutputPath || fs.existsSync(fullOutputPath))) {
+  const version = parsePinFile(versionFilePath);
+  const outputs = [outputPath, fullOutputPath].filter(Boolean);
+  if (ifMissing && jsonFilesAtVersion(outputs, (j) => j.pinnedVersion, version)) {
     return;
   }
-  const version = parsePinFile(versionFilePath);
   console.log(`📚 Fetching cyoda help index (pinned v${version})...`);
 
   const jsonUrl = JSON_URL(version);

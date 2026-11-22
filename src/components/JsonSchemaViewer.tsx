@@ -9,6 +9,12 @@ interface JsonSchemaViewerProps {
    * values — they live alongside the current schema, not in `common/`.
    */
   category?: string;
+  /**
+   * Schemas this one extends through `allOf: [{ $ref }]`, resolved at build
+   * time by scripts/generate-schema-pages.js. Their properties are shown
+   * under "Inherited from …".
+   */
+  bases?: Array<{ name: string; url: string; category?: string; schema: any }>;
 }
 
 interface SchemaProperty {
@@ -81,6 +87,7 @@ export const JsonSchemaViewer: React.FC<JsonSchemaViewerProps> = ({
   schema,
   name = 'Schema',
   category,
+  bases = [],
 }) => {
   return (
     <div className="json-schema-viewer-wrapper">
@@ -90,7 +97,17 @@ export const JsonSchemaViewer: React.FC<JsonSchemaViewerProps> = ({
           <p className="schema-description">{schema.description}</p>
         )}
       </div>
-      <SchemaProperties schema={schema} level={0} category={category} />
+      {(schema.properties || bases.length === 0) && (
+        <SchemaProperties schema={schema} level={0} category={category} />
+      )}
+      {bases.map((base) => (
+        <div key={base.url} className="schema-inherited">
+          <div className="property-label">
+            Inherited from <a href={base.url} className="property-ref-link">{base.name}</a>
+          </div>
+          <SchemaProperties schema={base.schema} level={0} category={base.category} />
+        </div>
+      ))}
     </div>
   );
 };

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync as _spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { jsonFilesAtVersion } from './lib/pinned-output.js';
 
 import { parsePinFile, detectPlatform, ensureBinary, err } from './lib/cyoda-binary.js';
 
@@ -48,11 +49,14 @@ export async function run({
   platformHint,
   spawnSync = _spawnSync,
 }) {
-  if (ifMissing && fs.existsSync(outputJsonPath) && fs.existsSync(outputYamlPath)) {
+  const version = parsePinFile(versionFilePath);
+  if (
+    ifMissing &&
+    fs.existsSync(outputYamlPath) &&
+    jsonFilesAtVersion([outputJsonPath], (j) => j.info?.version, version)
+  ) {
     return;
   }
-
-  const version = parsePinFile(versionFilePath);
   console.log(`📘 Fetching cyoda OpenAPI spec (pinned v${version})...`);
 
   const versionCacheDir = path.join(cacheDir, `v${version}`);

@@ -153,13 +153,13 @@ test('CloudEventsMalformed: binary returns invalid JSON', async () => {
 // --if-missing: short-circuits when outputDir already has .json files
 // ---------------------------------------------------------------------------
 
-test('--if-missing: short-circuits when outputDir has content', async () => {
+test('--if-missing: short-circuits when outputDir is stamped with the pinned version', async () => {
   const versionFile = tmpVersionFile('0.6.2');
   const outputDir = tmpDir();
   const cacheDir = tmpDir();
 
-  // Pre-populate a .json file so --if-missing triggers
   fs.writeFileSync(path.join(outputDir, 'existing.json'), '{"already":"here"}');
+  fs.writeFileSync(path.join(outputDir, '.pinned-version'), '0.6.2\n');
 
   let spawnCalled = false;
   const spySpawnSync = (...args) => {
@@ -183,3 +183,31 @@ test('--if-missing: short-circuits when outputDir has content', async () => {
   fs.rmSync(outputDir, { recursive: true });
   fs.rmSync(cacheDir, { recursive: true });
 });
+
+for (const [label, stamp] of [['unstamped', null], ['stamped with another version', '0.6.1']]) {
+  test(`--if-missing: re-fetches when outputDir is ${label}`, async () => {
+    const versionFile = tmpVersionFile('0.6.2');
+    const outputDir = tmpDir();
+    const cacheDir = tmpDir();
+    fs.writeFileSync(path.join(outputDir, 'existing.json'), '{"already":"here"}');
+    if (stamp) fs.writeFileSync(path.join(outputDir, '.pinned-version'), `${stamp}\n`);
+
+    await run({
+      fetch: async () => { throw new Error('no fetch'); },
+      spawnSync: makeSpawnSync('0.6.2', VALID_PAYLOAD),
+      versionFilePath: versionFile,
+      outputDir,
+      cacheDir,
+      ifMissing: true,
+      platformHint: { platform: 'darwin', arch: 'arm64' },
+    });
+
+    assert.equal(fs.existsSync(path.join(outputDir, 'existing.json')), false, 'stale schemas are replaced');
+    assert.equal(fs.existsSync(path.join(outputDir, 'foo/Bar.json')), true);
+    assert.equal(fs.readFileSync(path.join(outputDir, '.pinned-version'), 'utf8').trim(), '0.6.2');
+
+    fs.rmSync(versionFile);
+    fs.rmSync(outputDir, { recursive: true });
+    fs.rmSync(cacheDir, { recursive: true });
+  });
+}
