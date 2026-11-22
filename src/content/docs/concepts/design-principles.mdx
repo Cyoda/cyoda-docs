@@ -8,7 +8,7 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 Cyoda's shape follows from a few connected ideas. Once those click, the rest of the
-platform — the APIs, the workflows, the audit trail, the deployment tiers — is just
+platform — the APIs, the workflows, the audit trail, the deployment options — is
 what falls out of them. This page is the high-level picture; the pages that follow
 drill into each idea in depth.
 
@@ -31,16 +31,18 @@ between them, and the criteria and processors that run along each transition. Th
 entity lives inside that machine.
 
 Cyoda's state machines are close in spirit to BPM flows but looser: transitions can
-be **automatic** (fire on entering a state) or **manual** (invoked by an actor), and
-a workflow need not be linear or terminate. Cycles and branches are first-class.
+be **automatic** (fire on entering a state), **manual** (invoked by an actor) or
+**scheduled** (fire on a timer), and a workflow need not be linear or terminate.
+Cycles and branches are first-class.
 
 See [Entities and lifecycle](/concepts/entities-and-lifecycle/) for the full model,
 including the state-machine diagram.
 
 ## Transitions are the unit of change
 
-Nothing in Cyoda is overwritten. Every transition produces a new, durable revision
-of the entity, validated against the model at the moment it happened. Processors run
+Nothing in Cyoda is overwritten. Every write, with the transitions it runs, produces
+a new, durable revision of the entity, validated against the model at the moment it
+happened. Processors run
 under a defined event contract; criteria gate whether the transition is allowed to
 fire at all.
 
@@ -50,17 +52,18 @@ logs, and schema-lineage queries are all native operations.
 
 ## Events drive the machine
 
-Events — "file uploaded", "payment received", "a manual transition issued by an operator" — trigger transitions.
-Transitions invoke processors. Processors can be synchronous or asynchronous, and
-can run inside or alongside the transition's transaction. The platform keeps the
-whole chain observable and replayable.
+Events — "file uploaded", "payment received", "a manual transition issued by an
+operator", "a deadline reached" — trigger transitions. Transitions invoke
+processors, which run in your own compute nodes, either inside the transition's
+transaction or, for slow external work, after its pre-callout state has
+committed. The platform keeps the whole chain observable and replayable.
 
-## Same semantics, every tier
+## Same semantics, every deployment
 
-The same entity, workflow, and transition semantics run on every deployment tier
-Cyoda supports: in-memory for tests, SQLite on a desktop, Docker for a single
-machine, Kubernetes via Helm, or Cyoda Cloud for a managed fleet. Applications
-move between tiers without rewriting their domain model.
+The same entity, workflow, and transition semantics run on every storage
+backend and deployment option: in-memory for tests, SQLite on a desktop, Docker
+for a single machine, and PostgreSQL on Kubernetes via Helm. Applications move
+between them without rewriting their domain model.
 
 ## TL;DR
 
@@ -68,23 +71,28 @@ move between tiers without rewriting their domain model.
 - All persisted data is an **entity** with a typed model and a lifecycle state.
 - Each entity follows a **workflow** — a state machine of states, transitions,
   criteria, and processors.
-- **Transitions** are the atomic unit of change; each one produces a new revision.
-- Transitions can be **automatic** (fire on state entry) or **manual** (invoked).
-- Criteria **guard** transitions; processors **execute** along them, sync or async.
+- **Transitions** are the unit of change; every write produces a new revision.
+- Transitions can be **automatic** (fire on state entry), **manual** (invoked) or
+  **scheduled** (fire on a timer).
+- Criteria **guard** transitions; processors **execute** along them, in your
+  compute nodes.
 - **History** is the storage model, not an add-on; every revision is addressable.
 - **Events** drive transitions; the whole chain is observable and replayable.
-- The same semantics apply on every tier, from in-memory tests to the cloud.
+- The same semantics apply on every deployment, from in-memory tests to a
+  Kubernetes cluster.
 </Aside>
 
 ## Where to go next
 
 - [Entities and lifecycle](/concepts/entities-and-lifecycle/) — schemas, states,
   history, and the state-machine shape of an entity.
-- Workflows and events — how transitions, processors, and criteria are wired
-  together. *(Coming as the Concepts section fills out.)*
-- History and audit — query patterns for time travel and schema lineage.
-  *(Coming.)*
-- APIs and surfaces, tiers and deployment options, authentication and identity —
+- [Workflows and events](/concepts/workflows-and-events/) — how transitions,
+  processors, and criteria are wired together.
+- [Design practices](/help/design/) — practical advice for designing entity
+  models and workflows, from `cyoda help design`.
+- [APIs and surfaces](/concepts/apis-and-surfaces/),
+  [Digital twins and the growth path](/concepts/digital-twins-and-growth-path/),
+  and [Authentication and identity](/concepts/authentication-and-identity/) —
   each has its own page in this section.
 
 For the long-form argument behind these ideas, see
