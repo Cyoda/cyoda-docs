@@ -15,11 +15,11 @@ Cyoda exposes search over REST for any query that returns a set of
 entities. Use it when you need more than one entity back, when the filter
 goes beyond a single id lookup, or when you want to scope by workflow
 state. For single-entity reads, stay on the CRUD endpoints in
-[working with entities](/build/working-with-entities/); for cross-entity
-analytics, use [SQL](/build/analytics-with-sql/); for event-driven
+[working with entities](/build/working-with-entities/); for event-driven
 compute, use [gRPC compute nodes](/build/client-compute-nodes/). For
 counts and aggregates without the entity bodies, jump to
-[grouped statistics](#grouped-statistics).
+[grouped statistics](#grouped-statistics). For reads with an answer that
+does not change, see [consistent reads](/build/consistent-reads/).
 
 ## Two query modes
 
@@ -34,22 +34,18 @@ expected result size and urgency; the filter grammar is identical.
   a small report.
 - **Background** (API term: `async`) — queued. The request returns a
   job handle; poll it, then page the results. Result size is
-  **unbounded**. On the Cassandra-backed tier (Cyoda Cloud, or a
-  licensed Enterprise install), `async` runs distributed across
-  the cluster: for a fixed query shape, throughput scales roughly
-  linearly with the number of nodes.
+  **unbounded**, and every result page reads one fixed instant.
 
 <Aside type="caution" title="Direct search fails rather than truncating">
 
 A direct search whose matched set exceeds the effective `limit` returns
 `400 SEARCH_RESULT_LIMIT`. It does **not** return the first `limit`
-entities. This is deliberate: a truncated page was indistinguishable
-from a complete one, so callers silently processed partial data.
+entities. This is deliberate: a truncated page is indistinguishable
+from a complete one, so a caller would silently process partial data.
 
 - `limit` defaults to **1000** when omitted, and caps at **10000**.
-- `limit=0` — which once meant "unbounded" — is rejected with
-  `400 BAD_REQUEST`, as is any value below 1. gRPC rejects `limit < 1`
-  identically.
+- `limit=0`, and any other value below 1, is rejected with
+  `400 BAD_REQUEST`. gRPC rejects `limit < 1` identically.
 - A matched set exactly equal to `limit` succeeds.
 
 When you hit it, narrow the condition, raise `limit` within the maximum,
@@ -96,8 +92,8 @@ each carrying `data` plus a `meta` block with the id, model key, state, and
 timestamps.
 
 ```
-{"type":"ENTITY","data":{"customerId":"CUST-7"},"meta":{"id":"74807f00-…","state":"submitted","creationDate":"2026-03-01T10:00:00.000000000Z"}}
-{"type":"ENTITY","data":{"customerId":"CUST-7"},"meta":{"id":"89abc100-…","state":"submitted","creationDate":"2026-03-02T11:30:00.000000000Z"}}
+{"data":{"amount":1200,"channel":"web","country":"GB","currency":"EUR","customerId":"CUST-7","orderId":"ORD-1"},"meta":{"creationDate":"2026-11-22T22:06:55.897393Z","id":"07ca5632-e6c1-11f1-9406-ae468cd3ed16","lastUpdateTime":"2026-11-22T22:06:55.920038Z","modelKey":{"name":"orders","version":1},"state":"submitted","transactionId":"07cdc772-e6c1-11f1-9406-ae468cd3ed16","transitionForLatestSave":"submit"},"type":"ENTITY"}
+{"data":{"amount":800,"channel":"web","country":"GB","currency":"EUR","customerId":"CUST-7","orderId":"ORD-2"},"meta":{"creationDate":"2026-11-22T22:06:55.929465Z","id":"07cf3a44-e6c1-11f1-9406-ae468cd3ed16","lastUpdateTime":"2026-11-22T22:06:55.950849Z","modelKey":{"name":"orders","version":1},"state":"submitted","transactionId":"07d27ad8-e6c1-11f1-9406-ae468cd3ed16","transitionForLatestSave":"submit"},"type":"ENTITY"}
 ```
 
 Because it is a stream, parse it line by line rather than buffering the whole
@@ -129,15 +125,45 @@ GET /api/search/async/{jobId}?pageNumber=0&pageSize=1000
 GET /api/search/async/{jobId}?pageNumber=1&pageSize=1000
 ```
 
-The status response carries `searchJobStatus` (`RUNNING`, `SUCCESSFUL`,
-`FAILED`, `CANCELLED`, or `NOT_FOUND`), `entitiesCount` for the total match
-count, and `expirationDate`. Fetching results before the job is `SUCCESSFUL`
-returns `400 BAD_REQUEST`.
+A status response for a finished job:
+
+```json
+{
+  "calculationTimeMillis": 0,
+  "createTime": "2026-11-22T22:07:00.050271Z",
+  "entitiesCount": 4,
+  "expirationDate": "2026-11-22T23:07:00.050598Z",
+  "finishTime": "2026-11-22T22:07:00.050598Z",
+  "searchJobStatus": "SUCCESSFUL"
+}
+```
+
+- `searchJobStatus` is `RUNNING`, `SUCCESSFUL`, `FAILED` or `CANCELLED`. A job
+  that does not exist, or has expired, is `404 SEARCH_JOB_NOT_FOUND`.
+- `entitiesCount` is the total match count (`0` while the job runs).
+- `finishTime` is absent while the job runs.
+- `expirationDate` is when the job stops being readable: `finishTime` plus
+  `CYODA_SEARCH_SNAPSHOT_TTL` (default `1h`). While the job runs it is a lower
+  bound, `createTime` plus the TTL. From that instant the job's status,
+  results and cancel answer `404 SEARCH_JOB_NOT_FOUND`.
+- `failureReason` is present only on a `FAILED` job. A failure the request
+  caused starts with the error code a direct search would answer, for example
+  `INVALID_FIELD_PATH: …`. Any other failure names no internal detail, for
+  example `SERVER_ERROR: internal error [ticket: <uuid>]` or
+  `STORAGE_UNAVAILABLE: storage is temporarily unavailable — retry`. Only the
+  leading code is stable.
+
+Fetching results before the job is `SUCCESSFUL` returns `400 BAD_REQUEST`.
 
 Results come back as a paged JSON object — `content` plus a `page` block with
-`number`, `size`, `totalElements` and `totalPages` — not as a stream. Job
-results expire 24 hours after creation; a single `jobId` can be paged
-repeatedly until then.
+`number`, `size`, `totalElements` and `totalPages` — not as a stream. A single
+`jobId` can be paged repeatedly until its `expirationDate`.
+
+The job reads at one instant. Without `pointInTime`, the server takes a fresh
+consistency time at submission and records it on the job, so the result
+includes every save confirmed before the submit and every page agrees. A
+`pointInTime` you pass must be at or before the consistency time. See
+[consistent reads](/build/consistent-reads/#async-search).
 
 Async search never returns `SEARCH_RESULT_LIMIT`: it snapshots the whole
 matched set and pages over it. An out-of-range `pageSize` or `pageNumber` is a
@@ -191,9 +217,9 @@ A job ends `FAILED` in three cases:
 - The job lost its executor `CYODA_SEARCH_JOB_MAX_ATTEMPTS` times (default `3`).
 - The model's schema became unreadable between submission and execution.
 
-A graceful shutdown releases its in-flight jobs immediately for reclaim. A
-released claim does not count against the attempt cap, so a rolling restart of
-any length is safe.
+A graceful shutdown or restart releases its in-flight jobs immediately for
+reclaim, so a planned handoff is prompt rather than waiting for the heartbeat
+to go stale.
 
 ### Cancelling a job
 
@@ -251,19 +277,31 @@ maximum depth of 50:
 }
 ```
 
-**`array`** — match positional values in a JSON array. The path addresses the
-array's **elements**, so it must carry a trailing `[*]`; a bare path is
-`400 INVALID_FIELD_PATH`. A `null` entry tests nothing at that index:
+**`array`** — test the elements of one array by position:
 
 ```json
-{ "type": "array", "jsonPath": "$.laureates[*]",
-  "values": ["John", null, "Hopfield"] }
+{ "type": "array", "jsonPath": "$.scores[*]",
+  "operatorType": "GREATER_THAN", "values": [50, null, 70] }
 ```
 
-Each non-null entry is a positional test, and the server combines the tests
-with `AND`. The example matches when element 0 equals `"John"` **and** element
-2 equals `"Hopfield"`. A `values` array of only `null` entries matches every
-entity.
+- `jsonPath` addresses the array's **elements**. It must end in `[*]` and
+  contain no other `[*]`; otherwise it is `400 INVALID_FIELD_PATH`. To test an
+  inner array of an outer array, index the outer one: `$.orders[0].lines[*]`.
+- `operatorType` is **required**. It is any operator a `simple` clause
+  accepts, applied at every tested position.
+- `values` has one entry per position, from index 0. A `null` entry does not
+  test that position. An entry is a scalar, or a `[low, high]` pair under
+  `BETWEEN`/`BETWEEN_INCLUSIVE`.
+
+The clause is an `AND` of one `simple` clause per tested position. The example
+means `$.scores[0] > 50` **and** `$.scores[2] > 70`. Every rule of a `simple`
+clause applies to those positional clauses, including the type check.
+
+A clause must test at least one position. A missing `operatorType`, and a
+`values` that is missing, empty or all `null`, are `400 INVALID_CONDITION`. To
+match every entity, send an empty `AND` group. A whole condition tests at most
+10,000 entries: each entry in `values` counts one, `null` entries included, and
+every other clause counts one.
 
 **`function`** — delegate the predicate to a compute node. This clause is
 **criteria-only**. Criteria and search share one condition DSL, but search does
@@ -273,8 +311,10 @@ with `400 INVALID_CONDITION`. See
 [workflows and processors](/build/workflows-and-processors/) for its use as a
 transition criterion.
 
-`operatorType` also accepts the spellings `operator` and `operation`. The
-available operators are:
+A `simple`, `lifecycle` or `array` clause names its operator once, as
+`operatorType` or one of its aliases `operator` and `operation`. Two spellings
+in one clause are `400 INVALID_CONDITION`. The examples on this site use
+`operatorType`. The available operators are:
 
 | Group | Operators |
 |---|---|
@@ -287,16 +327,18 @@ available operators are:
 
 The server rejects an operator outside this list, and a missing `operatorType`,
 with `400 INVALID_CONDITION`. The error detail lists the valid operators. Every
-surface that carries a condition uses this code, including workflow import.
+search-shaped surface uses this code: direct and async search, conditional
+delete and grouped statistics. Workflow import refuses the same conditions with
+`400 VALIDATION_FAILED`.
 
 `IS_CHANGED` and `IS_UNCHANGED` are change-generation operators, not search
 predicates. cyoda-go does not implement them.
 
 <Aside type="tip" title="Matching everything">
 
-An empty body (`{}`), or any body without a `type`, is rejected with
-`400 BAD_REQUEST`. To match every entity in the model, send a vacuous `AND`
-group:
+An empty object (`{}`), or any condition without a `type`, is rejected with
+`400 INVALID_CONDITION`. To match every entity in the model, send a vacuous
+`AND` group:
 
 ```json
 { "type": "group", "operator": "AND", "conditions": [] }
@@ -410,14 +452,34 @@ The in-process kernel evaluates it.
 ## Predicate semantics
 
 Search and workflow criteria run on **one shared evaluation kernel**, so a
-predicate means the same thing wherever you write it. The kernel implements
-Cyoda Cloud's model; `cyoda help predicates` is the exhaustive reference.
+predicate means the same thing wherever you write it. `cyoda help predicates`
+is the exhaustive reference.
 
 **Comparison is type-directed and same-type.** An operand is parse-tested
 against the field's declared type(s), so the JSON number `30` and the string
 `"30"` behave identically. There is no cross-type coincidental matching: an
 operand that parses only as a number never matches a string-stored value.
 Numbers compare at arbitrary precision, so values beyond 2^53 are exact.
+
+**An operator must apply to the field's type.** The server refuses a condition
+whose operator does not apply to any of the field's declared types with
+`400 CONDITION_TYPE_MISMATCH`, instead of answering it:
+
+- String and pattern operators, `IEQUALS` and `INOT_EQUAL` included, need a
+  text type: `STRING` or `CHARACTER`. `CONTAINS` on a number is refused.
+- A date, a time or a UUID is not text, even though JSON carries it as a
+  string. Compare a date with the ordering and range operators —
+  `GREATER_OR_EQUAL "2024"` and `LESS_THAN "2025"`, not `STARTS_WITH "2024"`.
+  The `creationDate` and `lastUpdateTime` meta fields follow the same rule.
+- Ordering operators (`GREATER_THAN`, `GREATER_OR_EQUAL`, `LESS_THAN`,
+  `LESS_OR_EQUAL`) need a number, text or a date/time. Range operators need a
+  number, `STRING` or a date/time, with both bounds in the same type.
+- A boolean or a UUID has no order, only equality.
+- `IS_NULL` and `NOT_NULL` apply to every type.
+
+A field with several declared types takes the operator when one of them
+fits. A comparison or range operand must then parse into one of the types
+the operator applies to.
 
 **An operator that can never be satisfied still answers.** The server accepts
 an operand that parses into at least one declared type, then compares it
@@ -464,11 +526,27 @@ when the server anchors it.
 *coarser* operand that upscales — `"2024"` or `"2024-09"` are valid against a
 full timestamp.
 
-**Validation is parse-based**, evaluated against the target model:
+**Validation is parse-based**, evaluated against the target model. The
+server checks a condition in one fixed order, and the first failing step gives
+the code:
 
-- `400 CONDITION_TYPE_MISMATCH` — the operand parses into none of the field's
-  declared types. Comparison and range operators only; string and pattern
-  operators and presence tests carry no operand-type constraint.
+1. The body must parse as a condition (`INVALID_CONDITION`).
+2. The model must exist (`404 MODEL_NOT_FOUND`).
+3. Structure (`INVALID_CONDITION`, or `INVALID_FIELD_PATH` for a malformed
+   path).
+4. Patterns (`INVALID_CONDITION`).
+5. The model's paths (`INVALID_FIELD_PATH`).
+6. Types (`CONDITION_TYPE_MISMATCH`, or `INVALID_FIELD_PATH` for a `lifecycle`
+   field that is not a meta field).
+
+The order is the same on direct and async search, conditional delete and
+grouped statistics, so one condition gets the same code on each. The codes
+mean:
+
+- `400 CONDITION_TYPE_MISMATCH` — the operator applies to none of the field's
+  declared types, or a comparison or range operand parses into none of the
+  types the operator applies to. See
+  [an operator must apply to the field's type](#predicate-semantics).
 - `400 INVALID_FIELD_PATH` — the path is outside the
   [grammar](#how-a-field-path-is-written), is unknown to the model, or names a
   container with no scalar form: a bare object path, or a `[*]` path over an
@@ -477,32 +555,28 @@ full timestamp.
   scalar kind — see [how a field path is written](#how-a-field-path-is-written).
   `IS_NULL`/`NOT_NULL` are exempt from the container rejection, since they test
   presence rather than a value.
-- `400 INVALID_CONDITION` — a structural or shape failure rather than a path or
-  type one: an unknown or missing `operatorType`, a `null`, object or complex
-  operand on a binary or range operator, a range operand that is not a
-  two-element array, a malformed `LIKE`/`MATCHES_PATTERN` operand, a string or
-  pattern operator on a temporal meta field, an `array` clause on a bare path,
-  or a `function` clause at any depth.
+- `400 INVALID_CONDITION` — a body that does not parse as a condition, or a
+  structural or shape failure rather than a path or type one: a missing
+  `type`; an unknown or missing `operatorType`; an operator written twice; a
+  member the clause does not declare, in another letter case, or written
+  twice; a missing or `null` operand on any operator except `IS_NULL` and
+  `NOT_NULL`; an object operand; an array operand outside
+  `BETWEEN`/`BETWEEN_INCLUSIVE`; a range operand that is not two non-null
+  scalar bounds; a malformed `LIKE`/`MATCHES_PATTERN` operand; an `array`
+  clause that tests no position; a condition over 10,000 entries; or a
+  `function` clause at any depth.
 - `500` — the server could not load or parse the model's schema, so it could
   not check the condition against the schema. The response carries a ticket id
   and no result set. A condition that contains only `lifecycle` clauses needs
   no schema, and the server answers it normally.
 
-There is no operator-versus-type rejection on a data path. `CONTAINS` against a
-numeric field is a valid request, and it evaluates to a non-match. The
-exception is the two temporal meta fields. A string or pattern operator on
-`creationDate` or `lastUpdateTime` is `400 INVALID_CONDITION`.
-
 ## Historical reads with `pointInTime`
 
-Every search accepts a `pointInTime` parameter to run against the world
-as it existed at a given timestamp. Each entity maintains a history of
-revisions; point-in-time queries return results using the entity state
-that was current at the specified timestamp. The result is the set of
-entities that would have matched, using the revision active at that
-time.
-
-The rule is canonical across every storage engine and read path: **inclusive of the requested instant** (`<=`), compared at native precision with no millisecond round-up.
+Every search accepts a `pointInTime` parameter to run against the data as it
+was at a given instant. The result is the set of entities that matched then,
+each in the revision current at that instant. The bound is **inclusive**
+(`<=`), compared at native precision with no rounding, on every storage engine
+and read path.
 
 `pointInTime` is a **query parameter** (RFC 3339), not a body field:
 
@@ -518,9 +592,12 @@ curl -X POST 'http://localhost:8080/api/search/direct/orders/1?pointInTime=2026-
 
 This is the primary way to answer audit and regulatory questions from
 REST — *what did this customer's open orders look like at quarter
-close?* The Trino surface exposes the same capability as a column named
-`point_time` (snake-case, matching SQL convention); for the analytical
-form, see [`point_time` in analytics](/build/analytics-with-sql/).
+close?*
+
+The instant must be at or before the **consistency time**; a later one is
+`400 POINT_IN_TIME_AFTER_CONSISTENCY_TIME`. To search "now" with an answer
+that cannot change, take the instant from `GET /api/entity/consistency-time`.
+See [consistent reads](/build/consistent-reads/).
 
 ## Sorting results
 
@@ -563,7 +640,7 @@ it in order.
 ### Paging (async)
 
 - `pageSize` and `pageNumber` are query parameters on `/search/async/{jobId}`; they apply at result-fetch time, not at job submission. `pageNumber` is zero-indexed.
-- A completed `jobId` is stable for its 24-hour retention window — page reads are idempotent.
+- A completed `jobId` is stable until its `expirationDate` — page reads are idempotent, and every page reads the job's recorded instant.
 
 ## Searching inside a transaction
 
@@ -587,6 +664,10 @@ protects against **phantoms** — an entity that starts matching your predicate
 after the snapshot was taken is not detected either way. The flag is ignored
 outside a transaction, and async search does not expose it at all, since it
 runs detached.
+
+A search inside a transaction without `pointInTime` reads the transaction's
+snapshot plus its own writes. With `pointInTime` it reads committed data only.
+See [reads inside a transaction](/build/consistent-reads/#reads-inside-a-transaction).
 
 ## Bounding a search
 
@@ -625,13 +706,12 @@ value, and on a request that
   state is indexed on every entity and is almost always the right
   first predicate.
 - Prefer `async` as soon as the result set might be thousands of
-  entities; the distributed execution on the Cassandra tier makes it
-  cheaper per entity than a series of `direct` pages.
-- Avoid open-ended `pointInTime` scans across every revision — anchor
-  the query at a specific timestamp or a short window.
+  entities.
+- On PostgreSQL a point-in-time read costs one index probe per entity of the
+  model, not one per revision of its history, so a long history does not slow
+  it down.
 - On PostgreSQL, supported predicates push down into SQL — JSONB extraction plus numeric, range, and string comparisons run in the database. Non-pushable operators (regex, case-insensitive) are post-filtered as rows stream. This removes full-model scans and per-document decode; it is a constant-factor win, not a JSON-path index (indexing queried paths remains a separate operational step). SQLite already does this; the in-memory backend filters in memory by design.
 - Pushdown is a **narrowing optimization only** — the in-process kernel remains authoritative for every match decision, so results never diverge between backends. Pushdown applies inside transactions too, so an in-transaction search does not degrade into a full-model scan.
-- Boolean conditions on PostgreSQL are pushed down correctly as of v0.8.3. Previously an `EQUALS`/`NOT_EQUAL` against a boolean field returned `500`, because the planner bound a raw Go `bool` against a text-typed JSON extraction that the driver cannot encode.
 - A `NOT`, and a wildcard path under a scalar operator, are residual. The kernel re-checks them as candidate rows stream. Put a selective pushable predicate in the same `AND` group to narrow the population first.
 
 ## Grouped statistics
@@ -660,7 +740,7 @@ curl -X POST http://localhost:8080/api/entity/stats/orders/1/query \
     "condition": {
       "type": "simple",
       "jsonPath": "$.channel",
-      "operation": "EQUALS",
+      "operatorType": "EQUALS",
       "value": "web"
     }
   }'
@@ -674,31 +754,56 @@ The request has four parts:
   match. Duplicate entries are `400 DUPLICATE_GROUP_BY`.
 - **`aggregations`** (optional) — per-group numeric aggregates. Each is
   `{ "op", "field", "as" }` where `op` is one of `sum`, `avg`, `min`,
-  `max`, `stdev`, `field` is a JSONPath, and `as` is an optional alias
-  (defaults to `op(field)`, e.g. `sum($.amount)`). Every group also
-  carries a `count` whether or not you request aggregations.
+  `max`, `stdev`, `field` is a JSONPath, and `as` is an optional alias.
+  Without `as`, the key is `<op>_<field>` with the leading `$.` removed:
+  `avg` over `$.amount` is `avg_amount`. Two aliases that collide on
+  different `(op, field)` pairs are `400 DUPLICATE_AGGREGATION_ALIAS`. Every
+  group also carries a `count` whether or not you request aggregations.
 - **`condition`** (optional) — a predicate that restricts the population,
   using the **same** [condition DSL](#the-condition-dsl) as search.
 - **`limit`** (optional) — caps the number of buckets returned; must be
   ≤ the server's `CYODA_STATS_GROUP_MAX` (default 10000).
+- **`pointInTime`** (optional) — see
+  [point-in-time statistics](#point-in-time-statistics).
 
-The response is one bucket per group:
+The body is read strictly: an undeclared member, a member in another letter
+case, or a member written twice is `400 MALFORMED_REQUEST` (inside `condition`
+it is `400 INVALID_CONDITION`).
+
+The response is one bucket per group, sorted by `count` descending. Each
+`groupKey` entry echoes the `groupBy` entry as `path`:
 
 ```json
 [
   {
     "groupKey": [
-      { "field": "state", "value": "submitted" },
-      { "field": "$.country", "value": "GB" }
+      { "path": "state", "value": "submitted" },
+      { "path": "$.country", "value": "GB" }
     ],
-    "count": 31,
-    "aggregations": { "totalAmount": 48210.0, "avg($.amount)": 1555.16 }
+    "count": 3,
+    "aggregations": {
+      "avg_amount": 1500,
+      "totalAmount": 4500
+    }
+  },
+  {
+    "groupKey": [
+      { "path": "state", "value": "draft" },
+      { "path": "$.country", "value": "FR" }
+    ],
+    "count": 1,
+    "aggregations": {
+      "avg_amount": 300,
+      "totalAmount": 300
+    }
   }
 ]
 ```
 
 Aggregation values are numeric, or `null` when a group has no eligible
-inputs.
+inputs. The `aggregations` map is absent when the request has no
+aggregations. When the result would exceed `CYODA_STATS_GROUP_MAX` buckets,
+the request fails with `422 GROUP_CARDINALITY_EXCEEDED`.
 
 Both `groupBy` and an aggregation `field` follow the same
 [path grammar](#how-a-field-path-is-written) as a search condition, but they do
@@ -728,7 +833,21 @@ to the request body:
 
 This answers end-of-quarter and audit roll-up questions directly — *how
 many claims were pending at midnight on the last day of Q1?* When
-omitted, the query runs against the current consistency time.
+omitted, the query runs against the current committed state.
+
+The instant must be at or before the consistency time; a later one is
+`400 POINT_IN_TIME_AFTER_CONSISTENCY_TIME`. A value that is not RFC 3339, such
+as a bare date, is `400 MALFORMED_REQUEST`.
+
+The simple count reads take `pointInTime` as a **query parameter**:
+`GET /api/entity/stats`, `GET /api/entity/stats/states`, and their per-model
+forms `GET /api/entity/stats/{entityName}/{modelVersion}` and
+`GET /api/entity/stats/states/{entityName}/{modelVersion}`. Each counts the
+entities in the state they had at that instant:
+
+```
+GET /api/entity/stats/states/orders/1?pointInTime=2026-03-31T23:59:59Z
+```
 
 ## Where to go next
 
@@ -737,7 +856,7 @@ omitted, the query runs against the current consistency time.
 - [Working with entities](/build/working-with-entities/) — single-entity
   CRUD and transitions; the CRUD page for reference on the same
   surface.
-- [Analytics with SQL](/build/analytics-with-sql/) — heavy analytical
-  work, cross-entity joins, historical scans via `point_time`.
+- [Consistent reads](/build/consistent-reads/) — the consistency time,
+  consistent paging, and reads inside a transaction.
 - [Entities and lifecycle](/concepts/entities-and-lifecycle/) — the
   audit/history model behind `pointInTime`.

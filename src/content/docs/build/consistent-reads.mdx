@@ -1,0 +1,321 @@
+---
+title: "Consistent reads"
+description: "Commit-dated revisions, the consistency time, point-in-time reads with a fixed answer, consistent paging, and reads inside a transaction."
+sidebar:
+  order: 26
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import FromTheBinary from '../../../components/FromTheBinary.astro';
+
+<FromTheBinary topic="crud" />
+
+An entity read in cyoda-go reads one of two things: the current committed
+state, or the state **as at an instant** given in `pointInTime`. This page
+covers when a read's answer is fixed, how to read "now" with an answer that
+cannot change, how to page a list consistently, and what a read inside a
+transaction sees.
+
+The per-endpoint parameters are in
+[working with entities](/build/working-with-entities/) and
+[searching entities](/build/searching-entities/).
+
+## Revisions are dated at commit
+
+A revision is dated at the instant its transaction **commits**, on every
+storage backend. It is not dated at the instant the transaction started, and
+not at the instant the individual write was issued.
+
+Every entity a transaction writes carries the same instant. Two entities
+created by one collection create report the same `creationDate`:
+
+```json
+"2026-11-22T22:07:48.197162Z"
+"2026-11-22T22:07:48.197162Z"
+```
+
+The server assigns both entity dates:
+
+- `meta.creationDate` is the commit instant of the transaction that created
+  the entity. Later updates do not change it.
+- `meta.lastUpdateTime` is the commit instant of the transaction that wrote
+  this revision.
+
+A client cannot set either date. The server takes the instant immediately
+before the commit, so a date you read back is at or before the moment the
+write response returned, and never as early as the moment the transaction
+opened.
+
+Because one transaction has one instant, a `pointInTime` read sees all of a
+transaction's writes or none of them.
+
+## One version per entity per transaction
+
+A transaction records **one** version of each entity it writes, however often
+it writes that entity. A later write in the same transaction replaces the
+pending version. This holds for a workflow whose processors and automatic
+transitions write the entity several times, and for a collection update that
+names the same entity twice:
+
+```bash
+curl -X PUT http://localhost:8080/api/entity/JSON \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '[
+    { "id": "'"$ENTITY_ID"'", "payload": "{\"orderId\":\"ORD-50\",\"amount\":110}" },
+    { "id": "'"$ENTITY_ID"'", "payload": "{\"orderId\":\"ORD-50\",\"amount\":120}" }
+  ]'
+```
+
+The entity's data is the second payload (`amount` `120`), and its change
+history gains one `UPDATE` entry for the transaction. `GET /api/entity/{entityId}/changes` has
+one entry for each transaction that changed the entity.
+
+## Point-in-time reads
+
+A read with `pointInTime` returns the state as at exactly that instant,
+**inclusive**. A revision dated exactly at `pointInTime` is included, and the
+server applies no rounding. The bound is compared at the storage engine's
+native precision. Backends store timestamps at different precisions, so
+results agree across backends at millisecond granularity.
+
+These reads take `pointInTime`:
+
+- `GET /api/entity/{entityId}` and the list `GET /api/entity/{entityName}/{modelVersion}`.
+- Direct search, and async search submission.
+- Conditional delete, `DELETE /api/entity/{entityName}/{modelVersion}`.
+- The four `GET /api/entity/stats…` reads, and grouped statistics (as a body
+  field).
+- `GET /api/entity/{entityId}/changes` and `GET /api/entity/{entityId}/transitions`.
+
+A point-in-time read is committed-only. Inside a transaction it ignores the
+transaction's own uncommitted writes.
+
+### RFC 3339, strictly
+
+`pointInTime` is an RFC 3339 date-time with a time zone. The server reads it
+strictly:
+
+- Fractional seconds follow a `.`, at any precision up to nanoseconds.
+- The hour has two digits.
+- An offset such as `+02:00` is accepted and compared as the instant it names.
+- A bare date (`2026-03-31`) and an empty value are refused.
+
+A malformed query parameter is `400 BAD_REQUEST`, with the parameter named in
+`properties.parameter`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "BAD_REQUEST: invalid value for parameter 'pointInTime'",
+  "instance": "/entity/orders/1",
+  "properties": {
+    "errorCode": "BAD_REQUEST",
+    "parameter": "pointInTime"
+  }
+}
+```
+
+In the grouped-statistics body the same mistake is `400 MALFORMED_REQUEST`.
+
+<Aside type="caution" title="Encode the offset">
+
+A `+` in a query string decodes as a space, so
+`?pointInTime=2026-03-31T23:59:59+01:00` is refused. Percent-encode it
+(`%2B01:00`), let your HTTP client encode the parameter, or send the instant
+in UTC with `Z`.
+
+</Aside>
+
+## The consistency time
+
+A read at an instant is trustworthy only if no save can still land at or
+before that instant. The **consistency time** is the latest instant for which
+that holds, for your tenant. It is normally the store's current time. It
+waits only for saves that are still committing, which takes milliseconds.
+
+The consistency time has four properties:
+
+- **Complete.** Every save already confirmed to any client, on any node, is at
+  or before it.
+- **Final.** A read at or before it sees every save of your tenant dated at or
+  before that instant, and gives the same answer for ever. A save that is not
+  yet dated when the consistency time is returned is dated after it.
+- **Never goes back.** Each consistency time is at or after every one returned
+  earlier, on any node, and across a restart.
+- **Exact.** It is never rounded up, and it covers the store's own read
+  resolution.
+
+### `GET /api/entity/consistency-time`
+
+```bash
+curl http://localhost:8080/api/entity/consistency-time \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"consistencyTime":"2026-11-22T22:05:35.03883Z"}
+```
+
+The value is at the store's full precision. Over gRPC the same value comes
+from `EntityConsistencyTimeGetRequest`.
+
+When [clock control](/help/clock/) is on, the store takes its time from the
+platform clock, which a test can set.
+
+### The fence
+
+A read with a `pointInTime` later than the consistency time is refused with
+`400 POINT_IN_TIME_AFTER_CONSISTENCY_TIME`. The server does not wait. The
+problem carries the current consistency time in `properties.consistencyTime`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "POINT_IN_TIME_AFTER_CONSISTENCY_TIME: pointInTime 2030-01-01T00:00:00Z is later than the consistency time 2026-11-22T22:08:34.85159Z; read at or before the consistency time (GET /entity/consistency-time returns the current one)",
+  "instance": "/entity/orders/1",
+  "properties": {
+    "consistencyTime": "2026-11-22T22:08:34.85159Z",
+    "errorCode": "POINT_IN_TIME_AFTER_CONSISTENCY_TIME"
+  }
+}
+```
+
+An instant at or before the store's clock is never refused this way: the
+store waits for the tenant's saves that are still committing. Only an instant
+later than the store's clock is refused. That is a future instant, or an
+instant from a client clock that runs ahead of the store's clock. Over gRPC
+the envelope has no properties, so the consistency time is in the message
+text.
+
+Errors that do not involve the instant are reported first: a malformed value,
+an unknown model, or `pointInTime` together with `transactionId`. A `404` that
+the read itself produces, such as an unknown entity id, comes after the fence.
+
+`503 CONSISTENCY_TIME_UNAVAILABLE` (retryable) means the store could not
+certify a consistency time within its wait budget, because a save stayed in
+its commit phase too long. The budget is 10 seconds on PostgreSQL (or
+`CYODA_POSTGRES_STATEMENT_TIMEOUT` when that is lower) and up to 11 seconds on
+SQLite; the memory backend never waits. The response has no `Retry-After`
+header. Retry with back-off, for example starting at 100 ms and doubling.
+Repeated occurrences mean that a commit is stalling. The consistency-time
+read, an async search submitted without `pointInTime`, and any read with a
+`pointInTime` can answer it.
+
+## Reading "now" with a fixed answer
+
+A read without `pointInTime` reads what is committed when the store runs the
+query. Two such reads can differ.
+
+To read the current state with an answer that cannot change, take the
+consistency time and pass it as `pointInTime`. A read at that value:
+
+- is never refused with `POINT_IN_TIME_AFTER_CONSISTENCY_TIME`, on any node
+  (a `503` is still possible);
+- includes every save confirmed before you asked;
+- returns the same answer if you repeat it.
+
+Do not use the client's own clock for "now". A client clock that runs ahead
+of the store's clock produces instants that the fence refuses.
+
+## Consistent paging
+
+The pages of a list read without `pointInTime` are read at different
+moments. An entity created or deleted between two page requests can shift
+the pages, so an entity can be skipped or returned twice.
+
+For consistent pages, take the consistency time **once** and pass it as
+`pointInTime` on every page:
+
+```bash
+BASE=http://localhost:8080/api
+PAGE_SIZE=100
+CT=$(curl -s "$BASE/entity/consistency-time" \
+  -H "Authorization: Bearer $TOKEN" | jq -r .consistencyTime)
+
+page=0
+while :; do
+  batch=$(curl -s --get "$BASE/entity/orders/1" \
+    -H "Authorization: Bearer $TOKEN" \
+    --data-urlencode "pointInTime=$CT" \
+    --data-urlencode "pageSize=$PAGE_SIZE" \
+    --data-urlencode "pageNumber=$page")
+  echo "$batch" | jq -c '.[]'
+  [ "$(echo "$batch" | jq length)" -lt "$PAGE_SIZE" ] && break
+  page=$((page + 1))
+done
+```
+
+Every page reads the same state, on whichever node serves it, and each entity
+carries the instant in `meta.pointInTime`. The list order is stable and
+deterministic; the specific order depends on the storage engine and is based
+on the entity id.
+
+The same recipe makes a set of reads agree with each other: pass one
+consistency time to a list, a search and a statistics query, and they
+describe one state of the data.
+
+## Async search
+
+An async search submitted **without** `pointInTime` takes a fresh consistency
+time at submission and records it on the job. The status and every result
+page read at that instant, so all pages of the result agree. The result
+includes every save already confirmed when the submit was made. A save that
+is not yet confirmed at submission may or may not appear.
+
+A `pointInTime` you pass is fenced at submission and recorded the same way.
+See [async search](/build/searching-entities/#an-async-search).
+
+## Reads inside a transaction
+
+A compute node's callback that carries the transaction token
+(`X-Tx-Token`) [joins the workflow's transaction](/build/client-compute-nodes/#1031-transaction-joined-callbacks).
+A read on that callback runs inside the transaction:
+
+- **Without `pointInTime`**, it sees the transaction's snapshot plus its own
+  writes: the committed state as it was when the transaction began. A commit
+  by another transaction that completes later is not visible to it, also when
+  it reads again.
+- **With `pointInTime`**, it sees committed data at that instant only, and it
+  is fenced like any other point-in-time read.
+- **Change history** lists committed changes only, on every backend. The
+  transaction's own pending changes do not appear.
+
+A search inside a transaction can also add the entities it returns to the
+transaction's read-set. See
+[searching inside a transaction](/build/searching-entities/#searching-inside-a-transaction).
+
+## Reading what a transaction wrote
+
+`GET /api/entity/{entityId}?transactionId={transactionId}` returns the
+entity as that transaction left it: the one version the transaction
+committed.
+
+- It reads committed transactions only. A transaction that has not committed
+  (also when the request itself joins it), never wrote the entity, or deleted
+  it answers `404 ENTITY_NOT_FOUND`.
+- `pointInTime` and `transactionId` together are `400 BAD_REQUEST`.
+
+`GET /api/entity/{entityId}/transitions?transactionId={transactionId}`
+resolves the transaction to its commit instant and lists the transitions
+available at that instant. The instant is fenced like a `pointInTime`. Any
+node can resolve it, also after a restart. It is kept for one hour after the
+commit. An older id, an unknown id, or an id from another tenant is
+`400 BAD_REQUEST`.
+
+## Where to go next
+
+- [Working with entities](/build/working-with-entities/): create, read,
+  update and delete, with the request rules.
+- [Searching entities](/build/searching-entities/): conditions, direct and
+  async search, and grouped statistics.
+- [Entities and lifecycle](/concepts/entities-and-lifecycle/): the revision
+  model behind point-in-time reads.
+- `cyoda help crud` (POINT-IN-TIME SEMANTICS) and the
+  [`POINT_IN_TIME_AFTER_CONSISTENCY_TIME`](/help/errors/point_in_time_after_consistency_time/)
+  and [`CONSISTENCY_TIME_UNAVAILABLE`](/help/errors/consistency_time_unavailable/)
+  error topics.

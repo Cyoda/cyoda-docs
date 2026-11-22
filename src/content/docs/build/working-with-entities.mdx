@@ -1,39 +1,44 @@
 ---
 title: "Working with entities"
-description: "Create, read, update, and search entities via the cyoda-go API — worked examples."
+description: "Create, read, update, and delete entities via the cyoda-go REST API — worked examples, concurrency and request rules."
 sidebar:
   order: 20
 ---
 
+import { Aside } from '@astrojs/starlight/components';
 import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="crud" />
 
-This page shows the patterns for interacting with entities through the
-platform API. Examples assume a local cyoda-go instance running on the default
-port with SQLite persistence; the same requests work against Cyoda Cloud with
-the cloud endpoint and an issued token.
+This page shows the patterns for working with entities through the REST API.
+The examples assume a local cyoda-go instance on the default port, `8080`. In
+mock IAM mode the bearer token is not needed. In JWT mode every request
+carries a token; see
+[authenticating applications](/build/authenticating-applications/).
 
 The complete endpoint catalogue — parameters, response shapes, error codes —
 lives in the [API reference](/reference/api/). Keep that open as you work.
 
 ## The shape of the API
 
-Cyoda speaks REST for CRUD, search, and workflow invocation, gRPC for external
-processors, and Trino SQL for analytics. This page covers REST; see
+cyoda-go speaks REST for CRUD, search, and workflow invocation, and gRPC for
+compute nodes. This page covers REST; see
 [Build → client compute nodes](/build/client-compute-nodes/) for gRPC and the
 [APIs and surfaces](/concepts/apis-and-surfaces/) overview for the decision
 framework.
-
-Every request is authenticated with a bearer token. Every response includes
-the entity's current revision, state, and timestamps.
 
 For durable inbound payloads that are not yet entities — a staging buffer at the platform edge — see [edge messages](/build/edge-messages/).
 
 ## Create
 
-Post an entity to its model. The first time you post, Cyoda discovers the
-schema from what you send:
+An entity is created against a registered model in the `LOCKED` state.
+Register the model from sample data and lock it first; see
+[modeling entities](/build/modeling-entities/). A create against an unknown
+model is `404 MODEL_NOT_FOUND`, and against a model that is not locked it is
+`409 MODEL_NOT_LOCKED`. A create never discovers or changes the schema on its
+own; on a locked model only its
+[change level](/build/modeling-entities/#the-change-level-ladder) lets a write
+extend it.
 
 ```bash
 curl -X POST http://localhost:8080/api/entity/JSON/orders/1 \
@@ -51,51 +56,145 @@ curl -X POST http://localhost:8080/api/entity/JSON/orders/1 \
 ```
 
 The path is `/api/entity/{format}/{entityName}/{modelVersion}` — here `JSON`,
-`orders`, and version `1`. The response carries an array whose first element
-contains `entityIds[0]`, the **system-assigned UUID** of the new entity, plus
-its current state and revision number. Capture the UUID — downstream reads,
-updates, and transitions address the entity by that UUID, not by the business
-key `orderId`.
+`orders`, and version `1`. The response is an array with one element per
+committed transaction:
+
+```json
+[
+  {
+    "entityIds": [
+      "7ae965b8-e6c1-11f1-9408-ae468cd3ed16"
+    ],
+    "transactionId": "7ae9652c-e6c1-11f1-9408-ae468cd3ed16"
+  }
+]
+```
+
+`entityIds[0]` on the first element is the **system-assigned UUID** of the
+new entity. Capture it — reads, updates, and transitions address the entity
+by that UUID, not by the business key `orderId`. The response does not carry
+the entity's state; read the entity for that.
+
+The entity's data is a JSON object. A body that is `null`, a number, a
+string or a boolean is `400 VALIDATION_FAILED` (`expected object, got …`). A JSON array body creates one entity per
+element, in transactional chunks of up to `transactionWindow` entities
+(default `100`). To create entities of several models in one request, post a
+collection to `POST /api/entity/JSON`, where each item's `payload` is the
+entity encoded as a JSON **string**.
+
+The server dates the entity at the commit of its transaction. See
+[revisions are dated at commit](/build/consistent-reads/#revisions-are-dated-at-commit).
 
 ## Read
 
-Fetch the current revision by id. The `{entityId}` in these URLs is the UUID
-returned in `entityIds[0]` from the create response, not a business key like
-`orderId`:
+Fetch the current revision by id:
 
 ```bash
 curl http://localhost:8080/api/entity/${ENTITY_ID} \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-List every entity in a model with `GET /api/entity/{entityName}/{modelVersion}`:
+```json
+{
+  "data": {
+    "amount": 120.00,
+    "currency": "EUR",
+    "customerId": "CUST-7",
+    "lines": [
+      { "price": 60.00, "qty": 2, "sku": "AX-1" }
+    ],
+    "orderId": "ORD-42"
+  },
+  "meta": {
+    "creationDate": "2026-11-22T22:10:09.039097Z",
+    "id": "7ae965b8-e6c1-11f1-9408-ae468cd3ed16",
+    "lastUpdateTime": "2026-11-22T22:10:09.039097Z",
+    "modelKey": { "name": "orders", "version": 1 },
+    "state": "draft",
+    "transactionId": "7ae9652c-e6c1-11f1-9408-ae468cd3ed16",
+    "transitionForLatestSave": "loopback"
+  },
+  "type": "ENTITY"
+}
+```
+
+`meta.transactionId` identifies the revision you read. Send it as `If-Match`
+on a later update; see [concurrency](#concurrency).
+
+The single-entity read also takes `pointInTime` (the entity as at an instant)
+or `transactionId` (the version a committed transaction wrote), but not both.
+See [consistent reads](/build/consistent-reads/).
+
+### List a model
+
+List the entities of a model with `GET /api/entity/{entityName}/{modelVersion}`:
 
 ```
-GET /api/entity/orders/1
+GET /api/entity/orders/1?pageSize=100&pageNumber=0
 ```
 
-For filtered reads — predicates, pagination, result caps, historical reads —
-see [searching entities](/build/searching-entities/). The list endpoint does
-not accept ad-hoc field filters; those belong to search.
+| Parameter | Default | Meaning |
+|---|---|---|
+| `pageSize` | `20` | Entities per page |
+| `pageNumber` | `0` | Zero-based page index |
+| `pointInTime` | — | Read the model as at this instant |
+
+The order is stable and deterministic. Pages read without `pointInTime` are
+read at different moments, so writes between two requests can shift the
+pages. For consistent pages, pass one consistency time as `pointInTime` on
+every page; see
+[consistent paging](/build/consistent-reads/#consistent-paging).
+
+The list endpoint does not accept field filters. For filtered reads —
+predicates, result caps, sorting — see
+[searching entities](/build/searching-entities/).
 
 ## Update
 
 Direct updates use `PUT /api/entity/{format}/{entityId}` (loopback update — stores a new revision without a named transition) or `PUT /api/entity/{format}/{entityId}/{transition}` (update with a named transition). `PUT` has **wholesale-replace** semantics: any field you omit from the body is destroyed. To change only some fields, use [`PATCH`](#partial-update-patch) instead.
 
+The body of a `PUT` is required. An empty body is `400 BAD_REQUEST`, and
+nothing is committed.
+
 **Mutations that move the entity between lifecycle states should go through a
-named transition**, not a bare loopback update. Invoking the `submit` transition
-records it in the audit trail and runs any attached processors. The transition
-carries the new entity JSON in the request body (the platform stores the updated
-entity and records the named transition in one call):
+named transition**, not a bare loopback update. A named transition is
+recorded in the audit trail and runs its processors. The request carries the
+complete new entity:
 
 ```bash
 curl -X PUT http://localhost:8080/api/entity/JSON/${ENTITY_ID}/submit \
   -H 'Content-Type: application/json' \
+  -H "If-Match: ${LAST_TRANSACTION_ID}" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{ "orderId": "ORD-42", "status": "submitted" }'
+  -d '{
+    "orderId": "ORD-42",
+    "customerId": "CUST-7",
+    "amount": 130.00,
+    "currency": "EUR",
+    "lines": [
+      { "sku": "AX-1", "qty": 2, "price": 65.00 }
+    ]
+  }'
 ```
 
-See [Build → workflows and processors](/build/workflows-and-processors/) for
+The entity's state comes from the workflow, not from the data. Do not model
+it as a field in the payload.
+
+To fire a transition **without changing the data**, send the empty merge
+patch `{}` with `PATCH` to the transition route:
+
+```bash
+curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID}/submit \
+  -H 'Content-Type: application/merge-patch+json' \
+  -H "If-Match: ${LAST_TRANSACTION_ID}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{}'
+```
+
+A client can name any transition of the entity's current state that is not
+`disabled` and has no `schedule`, whether its `manual` is `true` or `false`.
+`GET /api/entity/{entityId}/transitions` lists them. See
+[Build → workflows and processors](/build/workflows-and-processors/) for
 how to declare transitions.
 
 ### Partial update (PATCH)
@@ -107,7 +206,7 @@ PATCH /api/entity/{format}/{entityId}
 PATCH /api/entity/{format}/{entityId}/{transition}
 ```
 
-The body is a sparse JSON object applied to the **stored** entity with RFC 7386 (`application/merge-patch+json`) semantics: a non-null key overwrites, an explicit `null` deletes that key, and an omitted key is left untouched.
+The body is a sparse JSON object applied to the **stored** entity with RFC 7386 (`application/merge-patch+json`) semantics: a non-null key overwrites, an explicit `null` deletes that key, an omitted key is left untouched, and an array is replaced whole.
 
 ```bash
 curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID} \
@@ -117,7 +216,40 @@ curl -X PATCH http://localhost:8080/api/entity/JSON/${ENTITY_ID} \
   -d '{ "amount": 130.00, "note": null }'
 ```
 
-Unlike `PUT`, **`If-Match` is required** — the merge is applied relative to the base you read, so patching a stale base risks a lost update. The token is the `meta.transactionId` from your last `GET`; a missing header returns `428 PRECONDITION_REQUIRED` and a stale one returns `412`. The merged result is validated strictly against the model schema — a `PATCH` never extends the model, even in an extend-permitting mode. The request is JSON-only (XML ⇒ `415`); RFC 6902 JSON Patch is recognised but returns `501` for now.
+The merged result is validated strictly against the model schema — a `PATCH`
+never extends the model, even under a change level that permits it. To add a
+new field, use `PUT`. On the named-transition route the merge is applied
+first, and the transition's processors then run on the merged entity and may
+overwrite patched fields. The request is JSON-only (XML ⇒ `415`); RFC 6902
+JSON Patch (`application/json-patch+json`) is recognised but returns `501`.
+
+### Concurrency
+
+Every write runs under snapshot isolation with first-committer-wins
+validation. A concurrent commit that changes an entity your transaction read
+aborts your transaction at commit with a **retryable `409 CONFLICT`**. A
+write race lost inside a transaction answers the same `409`, whatever the
+transaction did after it. Retry the request.
+
+`If-Match` adds a precondition across requests. It carries the
+`meta.transactionId` from your last read, unquoted, and it states the
+revision the update starts from:
+
+| `If-Match` | `PUT` | `PATCH` |
+|---|---|---|
+| A transaction id | Applied only if the entity is still at that revision; otherwise `412 ENTITY_MODIFIED` | Same |
+| `*` | Not accepted; answered `412 ENTITY_MODIFIED` | Unconditional; merges onto the current state |
+| Absent or empty | Unconditional replace | `428 PRECONDITION_REQUIRED` |
+
+The server checks `If-Match` **once**, when the update starts. Writes that
+the update's own transaction makes to the entity afterwards — the engine's
+save before a processor's callout, or the commit of a
+`COMMIT_BEFORE_DISPATCH` segment — do not fail it. A change committed by
+another transaction after that check is the retryable `409 CONFLICT`, not
+`412`.
+
+On a `412`, read the entity again, reapply your change to the new revision,
+and send the new `meta.transactionId`.
 
 ## Bounding a write
 
@@ -139,8 +271,8 @@ instead of an HTTP `408`.
 
 The server rejects the parameter with `400` on a request that
 [joins an open transaction](/build/client-compute-nodes/#1031-transaction-joined-callbacks).
-The same rule applies to `transactionSize` on a delete and to `timeoutMillis`
-on a search.
+The same rule applies to `transactionWindow` on a write, to `transactionSize`
+on a delete and to `timeoutMillis` on a search.
 
 `503 STORAGE_UNAVAILABLE` reports a problem in the storage layer, and it is
 **retryable**. It covers three conditions: the connection pool could not supply
@@ -153,6 +285,35 @@ A `2xx` response to a write means that the write is **visible to every later
 read on every node**. A caller can write and then read its own data back. Every
 storage engine delivers this contract — see
 [storage engines](/run/storage-engines/#one-application-contract).
+
+## Request rules
+
+The server reads every request strictly:
+
+- **Body members.** A typed request body spells each member exactly as the
+  API declares it, once. A member in another letter case, an undeclared
+  member, a member written twice, and anything after the JSON value are
+  `400`. The detail names the member and its location as a JSON Pointer, for
+  example `invalid JSON at "/0": unknown member name "Payload"`.
+- **Entity data is yours.** No member of an entity payload is unknown, and
+  `"a"` and `"A"` are two fields. A member written twice in one object is
+  still refused.
+- **Query parameters.** An operation accepts only the parameters it declares.
+  Any other name, including another letter case, is
+  `400 BAD_REQUEST: unknown query parameter "…"`, with the name in
+  `properties.parameter`. A parameter other than an array may be given once.
+- **Date-times.** `pointInTime` is RFC 3339, read strictly; see
+  [RFC 3339, strictly](/build/consistent-reads/#rfc-3339-strictly).
+
+A response can carry one or more `Cyoda-Warning` headers: a condition that did
+not fail the request, such as an entity run by the default workflow because no
+workflow is imported for its model. Each value is percent-encoded UTF-8:
+
+```
+Cyoda-Warning: no workflows imported for model %E2%80%94 using default workflow
+```
+
+See `cyoda help errors` (WARNINGS) for the encoding and the limits.
 
 ## What the platform will not store
 
@@ -180,43 +341,85 @@ curl -X DELETE http://localhost:8080/api/entity/${ENTITY_ID} \
 ```
 
 `DELETE /api/entity/{entityId}` removes exactly the entity with that UUID and
-returns its id, model key, and the transaction id of the delete.
+returns its id, model key, and the transaction id of the delete. It takes no
+query parameters; `pointInTime` there is
+`400 BAD_REQUEST: unknown query parameter "pointInTime"`.
 
 ```bash
-# Delete entities matching a condition (empty body ⇒ every entity in the model)
-curl -X DELETE http://localhost:8080/api/entity/orders/1?verbose=true \
+# Delete the entities that match a condition
+curl -X DELETE 'http://localhost:8080/api/entity/orders/1?verbose=true' \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
     "type": "simple",
     "jsonPath": "$.status",
-    "operation": "EQUALS",
+    "operatorType": "EQUALS",
     "value": "cancelled"
   }'
 ```
 
-The `DELETE /api/entity/{entityName}/{modelVersion}` endpoint honours an `AbstractConditionDto` request body and removes only the matching entities; an **empty body still means all**. `verbose=true` returns the deleted ids, and the response reports matched-vs-removed counts separately. A malformed condition returns `400 INVALID_CONDITION`.
+```json
+{
+  "deleteResult": {
+    "idToError": {},
+    "numberOfEntitites": 3,
+    "numberOfEntititesRemoved": 3
+  },
+  "entityModelClassId": "f3a02baa-f92f-5749-879d-61613b4aa4ba",
+  "ids": [
+    "f7fd0b32-e6c0-11f1-9406-ae468cd3ed16",
+    "f7ff12ce-e6c0-11f1-9406-ae468cd3ed16",
+    "f7fb4220-e6c0-11f1-9406-ae468cd3ed16"
+  ]
+}
+```
 
-Supplying the condition matters: earlier releases ignored it and wiped the entire model. Always send the condition you intend (or omit the body deliberately when you really do mean "all").
+The body of `DELETE /api/entity/{entityName}/{modelVersion}` is a condition
+(`QueryConditionDto`) in the [condition DSL](/build/searching-entities/#the-condition-dsl)
+that search uses, up to 10 MiB. Only the matching entities are removed.
+`numberOfEntitites` counts the matched entities and `numberOfEntititesRemoved`
+the removed ones (the field names are spelt this way in the API).
+`verbose=true` lists every id the delete attempted in `ids`.
 
-Both forms accept `pointInTime`, so you can scope a delete to the data as it
-was at a given instant.
+<Aside type="caution" title="An empty body deletes every entity of the model">
+
+A body that is absent, zero-length, or only JSON white space selects **every**
+entity of the model. Any other body must parse as a condition; otherwise the
+request is `400 INVALID_CONDITION` and deletes nothing. Send the condition you
+intend, and omit the body only when you mean "all".
+
+</Aside>
+
+The condition is checked exactly as a search condition is. A malformed
+condition is `400 INVALID_CONDITION`, a path the model does not declare is
+`400 INVALID_FIELD_PATH`, and an operator that does not fit the field's type
+is `400 CONDITION_TYPE_MISMATCH`. Nothing is deleted in any of these cases.
+
+Without `transactionSize` the delete is **one atomic transaction**. If one
+matched entity cannot be deleted, the request fails with that entity's error
+and deletes nothing. Two cases do not fail it: an entity selected at a
+`pointInTime` that is already gone is reported in `deleteResult.idToError`,
+and a lost write race is retried by the server. A race that persists answers a
+retryable `409 CONFLICT`.
+
+`pointInTime` selects the entities that existed at that instant, in committed
+state, and deletes their current rows. It is fenced by the
+[consistency time](/build/consistent-reads/#the-consistency-time).
 
 ### Deleting in batches
 
-By default, the server removes the whole selection in one transaction. Add
-`transactionSize` to remove it in independent, version-guarded batches:
+Add `transactionSize` to remove the selection in independent,
+version-guarded batches:
 
 ```
 DELETE /api/entity/orders/1?transactionSize=500
 ```
 
-A batch that is already committed stays durable if a later batch fails. The
-server records two conditions per id in `deleteResult.idToError`, and does not
-retry either:
-
-- A version mismatch. The entity changed after the server selected it.
-- A commit failure for the batch.
+Each batch is atomic. A batch that fails deletes nothing, and its error is
+reported in `deleteResult.idToError` for each of its entities. The other
+batches still run, and a batch that is already committed stays deleted. An
+entity that changed after the server selected it keeps its own entry in
+`idToError`. Only a batch that met a write conflict is run again.
 
 Without `pointInTime`, the server selects the matching entities again before
 each batch. If entities are created at least as fast as the server removes
@@ -230,7 +433,7 @@ transaction.
 
 ## Search
 
-Cyoda supports two query modes:
+cyoda-go supports two query modes:
 
 - **Direct** (synchronous, bounded-or-fail) — API term `direct`.
   Streams results right away as NDJSON. Good for UI lookups and short
@@ -241,12 +444,9 @@ Cyoda supports two query modes:
 - **Async** (background, unbounded, paged) — API term `async`.
   Queued as a job, returns a handle you can poll. Result size is
   unbounded; results are paged. Good for large result sets, periodic
-  reports, and exports. On the Cassandra-backed tier (Cyoda Cloud, or
-  a licensed Enterprise install), `async` search runs distributed
-  across the cluster and scales horizontally: query throughput for a
-  fixed shape grows roughly linearly with the number of nodes.
+  reports, and exports.
 
-Both accept the same filter grammar over entity fields, metadata, and
+Both accept the same condition grammar over entity fields, metadata, and
 workflow state. Pick `direct` by default; switch to `async` when a
 query would exceed the `direct` limit, would time out, or would hold
 resources you need elsewhere. Ordered top-N over a large model belongs on
@@ -255,21 +455,22 @@ examples, see [searching entities](/build/searching-entities/).
 
 ## Temporal queries
 
-Every entity's history is queryable. Add a `pointInTime` parameter to any read
-or search request to retrieve the world as of that timestamp:
+Every entity's history is queryable. Add `pointInTime` to a read or search to
+retrieve the state as at that instant:
 
 ```
 GET /api/entity/{entityId}?pointInTime=2026-03-01T00:00:00Z
 ```
 
-Point-in-time reads apply a single canonical rule across every storage engine and read path: **inclusive of the requested instant** (`<=`), compared at native precision with no millisecond round-up. The model-scoped list read (`GET /api/entity/{entityName}/{modelVersion}`) also honours `pointInTime` and stamps `meta.pointInTime` on the result.
+The bound is **inclusive** (`<=`) and compared at native precision with no
+rounding. The instant must be at or before the consistency time; a later one
+is `400 POINT_IN_TIME_AFTER_CONSISTENCY_TIME`. The list read stamps the
+instant on each entity as `meta.pointInTime`.
 
 This is the primary way to answer regulatory and audit questions: *what did
-this customer's balance look like at quarter close?* For the same
-parameter applied to searches, see
-[searching entities → historical reads](/build/searching-entities/#historical-reads-with-pointintime);
-for analytical reads expressed as SQL, see
-[analytics with SQL](/build/analytics-with-sql/).
+this customer's balance look like at quarter close?* For the consistency
+time, consistent paging and reads inside a transaction, see
+[consistent reads](/build/consistent-reads/).
 
 ## Change history
 
@@ -280,12 +481,14 @@ endpoint answers *who changed it, and when*:
 GET /api/entity/{entityId}/changes
 ```
 
-Each entry carries `changeType` (`CREATE`, `UPDATE`, or `DELETE`),
-`timeOfChange`, and a `user` — the principal the change is **attributed** to,
-always present. `transactionId` and `fieldsChangedCount` appear when the
-underlying entity version is available.
+The response lists one entry for each transaction that changed the entity,
+newest first. A transaction that wrote the entity several times has one
+entry. The history lists committed changes only.
 
-As of cyoda-go v0.8.3 an entry also carries who actually performed it:
+Each entry carries `changeType` (`CREATE`, `UPDATE`, or `DELETE`),
+`timeOfChange`, and a `user` — the principal the change is **attributed** to.
+`transactionId` appears when the entity version is available. An entry also
+carries who actually performed the change:
 
 - `attributedKind` — the kind of the attributed `user`: `user`, `service`, or
   `system`.
@@ -293,16 +496,16 @@ As of cyoda-go v0.8.3 an entry also carries who actually performed it:
   independent of attribution.
 
 The two differ whenever an action happened *because of* someone but not *as*
-them. A processor cascading writes off a user's transition is attributed to
-that user while executing as a service; a scheduled transition firing hours
-later is attributed to whoever armed it. Reading `user` alone cannot tell a
-service-executed cascade from a direct user action — read both when that
-distinction matters. See
+them. An on-behalf-of write for a user is attributed to that user and
+executed by the on-behalf-of client; a scheduled transition firing hours
+later is attributed to whoever armed it. Reading `user` alone cannot tell
+these apart — read both when that distinction matters. See
 [attribution is not authorization](/concepts/authentication-and-identity/#attribution-is-not-authorization)
 for how the platform captures it.
 
-Both fields are **absent** on rows written before v0.8.3 rather than present
-and `null`, so treat missing as "not recorded" rather than as a value.
+`attributedKind` and `executedBy` are **absent** on a change recorded without
+attribution, rather than present and `null`. Treat missing as "not recorded"
+rather than as a value.
 
 ## From a compute node
 

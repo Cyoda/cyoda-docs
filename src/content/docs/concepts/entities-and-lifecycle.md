@@ -41,20 +41,24 @@ The picture above sketches the building blocks:
 - **Criteria** (purple diamonds on a transition) — predicates that gate whether
   the transition is allowed to fire.
 
-Every transition produces a new, durable revision of the entity. Nothing is
-overwritten.
+Every transaction that changes an entity produces one new, durable revision of
+it. A transaction records one revision of each entity it writes, however many
+transitions, processors and writes it ran, so a create that cascades through
+several automatic transitions records one revision. Nothing is overwritten.
 
 ## Schema
 
 Every entity belongs to a named **model** identified by `modelName` and
-`modelVersion`. Cyoda auto-discovers the model schema from ingested samples
-rather than requiring it up front: as records flow in, Cyoda observes the
-fields that appear, the types they take, and the shape of nested arrays
-and objects. That observed shape is the schema.
+`modelVersion`. Cyoda discovers the model schema from sample data rather than
+requiring it up front: you import representative samples, and Cyoda records
+the fields that appear, the types they take, and the shape of nested arrays
+and objects. That observed shape is the schema. Entities are created only
+once the model is locked; from then on, a write extends the schema only as
+far as the model's change level allows.
 
 A model has two structural modes. While **unlocked**, it evolves by merging
-— new fields appear, types widen, a field comes to declare more than one
-kind. When **locked**, the
+further sample imports — new fields appear, types widen, a field comes to
+declare more than one kind. When **locked**, the
 structural contract is frozen and any incoming entity that does not match
 is rejected. Lock is the right default for production systems with external
 producers, where silently accepting a widened shape would be a compliance
@@ -80,5 +84,12 @@ of an entity is always retrievable. You can ask:
 - "What transitions has this entity been through, and when?" — transition log.
 - "Which version of the model was this revision validated against?" — schema lineage.
 
+A revision is dated at the instant its transaction commits, and every entity a
+transaction writes shares that instant, so a point-in-time read sees all of a
+transaction's writes or none of them. A point-in-time read is bounded by the
+**consistency time**, the latest instant at which no save can still land:
+a read at or before it gives the same answer for ever. See
+[consistent reads](/build/consistent-reads/).
+
 This is not an add-on audit layer bolted onto a mutable store; it is the storage model.
-See the [API reference](/reference/api/) for the temporal-query grammar.
+See the [API reference](/reference/api/) for the endpoints.

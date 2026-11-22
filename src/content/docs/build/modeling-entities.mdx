@@ -71,6 +71,40 @@ string, or dropping a field leaves its transition logic valid. The
 platform contract is the simpler and stricter pair: loose discovery, or
 lock-and-reject.
 
+### Register and lock a model
+
+Register a model by importing sample data, then lock it. An entity can be
+created only in a `LOCKED` model; a create against a model that is not locked
+is `409 MODEL_NOT_LOCKED`.
+
+```bash
+# Register orders version 1 from two sample documents
+curl -X POST http://localhost:8080/api/model/import/JSON/SAMPLE_DATA/orders/1 \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '[
+    { "orderId": "ORD-1", "customerId": "CUST-7", "amount": 120.50, "currency": "EUR" },
+    { "orderId": "ORD-2", "customerId": "CUST-8", "amount": 80, "currency": "EUR", "note": "rush" }
+  ]'
+
+# Lock it
+curl -X PUT http://localhost:8080/api/model/orders/1/lock \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The import answers with the model id. The lock answers:
+
+```json
+{"message":"Model orders:1 locked","modelId":"f3a02baa-f92f-5749-879d-61613b4aa4ba","modelKey":{"name":"orders","version":1},"success":true}
+```
+
+An import into a model that is already locked is
+`409 MODEL_ALREADY_LOCKED`. Run model administration — import, lock, unlock,
+delete, change level, unique keys — from one place, such as a deploy step,
+and not while writes to the model are in flight. A request that carries a
+transaction token cannot change a model:
+`400 MODEL_ADMIN_IN_JOINED_TRANSACTION`.
+
 ## What a field declares
 
 A field declares a **set of kinds**: scalar, object and array. For a scalar, it
@@ -103,6 +137,15 @@ applies the test per value. For example:
 `null` follows the declaration like any other value. A scalar field always
 accepts `null`. A container field accepts `null` where the model observed it.
 `null` does not widen the model.
+
+The root is the exception: **an entity's data is a JSON object**, at every
+change level. A write whose data is `null`, a scalar or an array is
+`400 VALIDATION_FAILED` (`expected object, got …`) and changes neither the
+model nor the entity.
+
+**An entity's model is fixed for the life of its id.** An update always
+targets the model the entity already has, and no request can move an entity
+to another model or model version.
 
 ## Field names must be addressable
 
@@ -147,8 +190,7 @@ Concretely:
   schema widens automatically.
 - **Widen types (pre-lock).** A field observed holding values of more than one
   type declares each of them, and a value is admitted when any declared type
-  admits it. See the [Trino SQL reference](/reference/trino/) for how the
-  primitive types map onto the analytical surface.
+  admits it.
 - **Lock.** Freeze evolution once the shape is stable. The default
   stance for anything with external producers.
 - **Bump `modelVersion` and register the new schema (post-lock).** A
@@ -199,6 +241,23 @@ The change level governs data returned by a **workflow processor** in the same
 way as data sent by a client. See
 [the model governs the data a processor returns](/build/workflows-and-processors/#processors).
 
+Set the change level when you define the model, before you lock it. A change
+on a locked model reaches each node as that node's model cache picks it up.
+
+**A schema extension commits on its own.** When a write brings structure that
+the model lacks and the level permits, the write extends the model in a short
+transaction of its own, before the write's own entity changes commit. So:
+
+- Two writes that extend the same model never conflict over it. Neither is
+  answered `409 CONFLICT` because of the other's extension.
+- The extension stays if the write fails afterwards — a processor error, a
+  unique-key violation, a conflict, a cancelled request. Retrying the write is
+  safe: an extension the schema already holds writes nothing.
+- Other clients can see the new field — in the model export, in search path
+  validation, in criteria — before the write that brought it commits.
+- Removing a field again takes unlocking the model (which needs zero
+  entities), deleting it and importing it again.
+
 Things to plan explicitly:
 
 - **Renames.** Cyoda does not rename a field for you; if you rename
@@ -234,13 +293,35 @@ the old revision intact.
 
 Beyond structure and types, a model can declare **composite unique keys** — multi-field uniqueness the engine enforces on create and update. Register them on an **UNLOCKED** model:
 
+```bash
+curl -X PUT http://localhost:8080/api/model/customers/1/unique-keys \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "uniqueKeys": [
+      { "id": "by-email", "fields": ["$.email"] },
+      { "id": "by-org-and-handle", "fields": ["$.org", "$.handle"] }
+    ]
+  }'
 ```
-PUT /model/{entityName}/{modelVersion}/unique-keys
-```
+
+The call replaces the model's whole key list. `uniqueKeys` is required: send
+`[]` to remove every key. A body without `uniqueKeys`, or with `null`, is
+`400 BAD_REQUEST` and changes nothing.
 
 Each key is an ordered set of scalar field paths, and uniqueness is scoped to `(tenant, model, version)` over live (non-deleted) entities. The null rule is all-or-nothing: if every field in a key is null or absent the entity is exempt; a partial key is rejected with `422 INVALID_UNIQUE_KEY`; a fully-present key is enforced. String comparison is byte-exact, and soft-deleting an entity frees its value-set for reuse.
 
-Composite unique keys are supported by the memory, SQLite, and PostgreSQL backends; the commercial backend returns `422 COMPOSITE_KEY_UNSUPPORTED` until its own support lands. Relevant error codes: `UNIQUE_VIOLATION` (409), `INVALID_UNIQUE_KEY` (422), `COMPOSITE_KEY_UNSUPPORTED` (422), and `INVALID_UNIQUE_KEY_DEFINITION` (422).
+**Keys are checked when a transaction commits**, on the entities as the
+transaction leaves them. A value that one entity frees in a transaction — by
+being deleted or re-keyed — is free for another entity of the same
+transaction, in either order. Two entities can swap their key values in one
+transaction, and a chain of moves commits, as long as the final entities are
+unique. A value claimed by two entities of one transaction, or held by an
+entity outside it, fails the commit with `409 UNIQUE_VIOLATION`.
+
+Composite unique keys are an optional storage-backend capability. The memory,
+SQLite and PostgreSQL backends support them. A storage backend that does not
+answers `422 COMPOSITE_KEY_UNSUPPORTED`. Relevant error codes: `UNIQUE_VIOLATION` (409), `INVALID_UNIQUE_KEY` (422), `COMPOSITE_KEY_UNSUPPORTED` (422), and `INVALID_UNIQUE_KEY_DEFINITION` (422).
 
 ## Anti-patterns
 
