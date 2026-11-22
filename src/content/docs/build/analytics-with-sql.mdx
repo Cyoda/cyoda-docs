@@ -9,12 +9,18 @@ import FromTheBinary from '../../../components/FromTheBinary.astro';
 
 <FromTheBinary topic="analytics" />
 
-:::caution[Upcoming]
-Trino SQL is on the roadmap and not yet implemented in cyoda-go. The surface below is proven in the enterprise Java/Kotlin Cyoda platform, of which cyoda-go is an adaptation; names and shapes may change before it lands in cyoda-go and [Cyoda Cloud](/cyoda-cloud/).
+:::caution[Not yet implemented in cyoda-go]
+Trino support is not yet implemented in cyoda-go: a cyoda-go server answers
+`404` to the `/sql/schema/*` API this page uses. The implementation is
+tracked in
+[cyoda-go#382](https://github.com/Cyoda/cyoda-go/issues/382), and the
+query-side reference (dialect scope, push-down, isolation, performance) in
+[cyoda-go#83](https://github.com/Cyoda/cyoda-go/issues/83). This page
+describes the planned surface; names and shapes may change before it ships.
 :::
 
-Cyoda projects every entity model into a set of virtual SQL tables and
-exposes them through a Trino connector. Use this surface for cross-entity
+The planned SQL surface projects every entity model into a set of virtual
+SQL tables and exposes them through a Trino connector. Use it for cross-entity
 analytics: joins across entity types, aggregates, reporting, time-series,
 BI dashboards. For operational read/write, stay on [REST](/build/working-with-entities/);
 for compute that runs against transitions, use [gRPC compute
@@ -40,15 +46,14 @@ The JDBC connection string pattern:
 jdbc:trino://<trino-endpoint>:443/cyoda/<your_schema>
 ```
 
-- `<trino-endpoint>` — the host serving the Trino connector. On
-  [Cyoda Cloud](/cyoda-cloud/), each environment will get a managed
-  endpoint.
+- `<trino-endpoint>` — the host serving the Trino connector.
 - `<your_schema>` — the SQL schema name you configured (via
   `PUT /sql/schema/putDefault/{schemaName}`).
 
-Authenticate with a bearer token issued by the platform. For
-technical-user setup and the OAuth 2.0 client-credentials flow, see
-[Authentication and identity](/concepts/authentication-and-identity/).
+Authenticate with a cyoda token. An M2M client gets one from its tenant's
+token endpoint, `POST /api/tenants/{tenant}/oauth/token`, with the
+`client_credentials` grant; see
+[Authenticating applications](/build/authenticating-applications/).
 
 ## A first query
 

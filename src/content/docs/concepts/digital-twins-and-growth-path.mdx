@@ -28,14 +28,14 @@ on the cost/scale curve.
 - **SQLite** — durable, single-file, zero-ops. Use it for edge and IoT
   deployments, small-team self-hosting, and local development where you want
   data to survive restarts but do not want to operate a separate database.
-- **PostgreSQL** — durable storage with `SERIALIZABLE` isolation for
-  production workloads. Run 3–10 stateless cyoda-go nodes behind a load
-  balancer for active-active HA, with PostgreSQL as the only external
-  dependency. This is the recommended production path for teams self-hosting.
-- **Cassandra (via Cyoda Cloud)** — a distributed, horizontally scalable
-  backend available today as a managed service. Use Cyoda Cloud when you need
-  enterprise-grade identity, multi-tenancy, and provisioning, and do not
-  want to run the infrastructure yourself.
+- **PostgreSQL** — durable storage with snapshot isolation
+  (`REPEATABLE READ` plus commit-time validation) for production workloads.
+  Run 2–20 stateless cyoda-go nodes behind a load balancer for active-active
+  HA, with PostgreSQL as the only external dependency. This is the
+  recommended production path for teams self-hosting.
+- **Commercial backends** — storage backends such as Cassandra, for
+  workloads that outgrow a single PostgreSQL primary. For those, contact
+  Cyoda.
 
 ## Choosing
 
@@ -44,15 +44,18 @@ Most teams make this choice along four axes:
 - **Durability** — can the data disappear on a restart? If yes, In-Memory is
   fine. Otherwise you need SQLite or up.
 - **Write volume and HA** — a single process can go a long way on SQLite, but
-  active-active HA with concurrent write safety wants PostgreSQL or cloud.
-- **Ops appetite** — PostgreSQL is one dependency; SQLite is zero; Cyoda Cloud
-  is "someone else's problem".
-- **Scale ceiling** — in-process stores have limits Cassandra does not.
+  active-active HA with concurrent write safety wants PostgreSQL or a
+  commercial backend.
+- **Ops appetite** — SQLite needs no other service; PostgreSQL is one
+  dependency.
+- **Scale ceiling** — a single PostgreSQL primary has limits a distributed
+  backend does not.
 
 You do not have to pick forever. The whole point of the growth path is that
 the application does not change when you move. A test suite can run on
 In-Memory today, the early product on SQLite, the growing service on
-PostgreSQL, and the enterprise fleet on Cyoda Cloud — with the same code.
+PostgreSQL, and a high-volume fleet on a commercial backend — with the same
+code.
 
 ## Where to go next
 
